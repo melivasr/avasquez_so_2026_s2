@@ -8,6 +8,7 @@
 
 #include "protocol.h"
 #include "task_parser.h"
+#include "calibration.h"
 
 static constexpr uart_port_t SERIAL_PORT = UART_NUM_0;
 
@@ -110,6 +111,50 @@ static bool process_deploy(const Frame &frame)
     return send_ack(MessageType::DeployTasks, 0);
 }
 
+static void process_calibrate(const Frame &frame)
+{
+    if (frame.length != 4) {
+        send_ack(MessageType::CalibrateReq, 1);
+        return;
+    }
+
+    const uint32_t tick_us =
+        static_cast<uint32_t>(frame.payload[0]) |
+        (static_cast<uint32_t>(frame.payload[1]) << 8) |
+        (static_cast<uint32_t>(frame.payload[2]) << 16) |
+        (static_cast<uint32_t>(frame.payload[3]) << 24);
+
+    // Rango aceptado: 1 ms a 1 s.
+    if (tick_us < 1000 || tick_us > 1000000) {
+        send_ack(MessageType::CalibrateReq, 1);
+        return;
+    }
+
+    const uint32_t ut_por_tick = calibration_measure(tick_us);
+
+    if (ut_por_tick == 0) {
+        send_ack(MessageType::CalibrateReq, 1);
+        return;
+    }
+
+    uint8_t payload[4] = {
+        static_cast<uint8_t>(ut_por_tick & 0xFF),
+        static_cast<uint8_t>((ut_por_tick >> 8) & 0xFF),
+        static_cast<uint8_t>((ut_por_tick >> 16) & 0xFF),
+        static_cast<uint8_t>((ut_por_tick >> 24) & 0xFF)
+    };
+
+    uint8_t encoded[FRAME_HEADER_SIZE + 4 + FRAME_CRC_SIZE];
+    size_t encoded_length = 0;
+
+    if (encode_frame(MessageType::CalibrateResp, payload, sizeof(payload),
+                     encoded, sizeof(encoded), &encoded_length)) {
+        uart_write_bytes(SERIAL_PORT,
+                         reinterpret_cast<const char *>(encoded),
+                         encoded_length);
+    }
+}
+
 static void process_received_frame(const uint8_t *data, size_t length)
 {
     if (!decode_frame(data, length, &decoded_frame)) {
@@ -122,6 +167,9 @@ static void process_received_frame(const uint8_t *data, size_t length)
         if (!process_deploy(decoded_frame)) {
             send_ack(MessageType::DeployTasks, 1);
         }
+    } else if (decoded_frame.type == MessageType::CalibrateReq) {
+        process_calibrate(decoded_frame);
+        
     } else {
         // Tipo válido a nivel de trama, pero aún no implementado.
         send_ack(decoded_frame.type, 2);
