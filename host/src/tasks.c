@@ -84,9 +84,19 @@ bool task_load(const char *path,Task *tasks,size_t *count,char *err,size_t n) {
     int read_result;
     *count=0;
     bool ok=true;
+    bool first_record=true;
     while ((read_result=bounded_line(f,line,sizeof line))>0) {
         lineno++;
         if (line[0]=='#' || line[0]=='\n' || line[0]=='\r') continue;
+        static const char header[]="id,tipo,W,T,D,criticidad";
+        size_t length=strcspn(line,"\r\n");
+        if(first_record && length==sizeof header-1 &&
+           memcmp(line,header,length)==0 &&
+           strspn(line+length,"\r\n")==strlen(line+length)) {
+            first_record=false;
+            continue;
+        }
+        first_record=false;
         Task t;
         char why[160];
         if (*count==TASK_CAP || !task_parse(line,&t,why,sizeof why)) {
