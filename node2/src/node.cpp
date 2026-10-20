@@ -3,6 +3,7 @@
 #include "node.h"
 #include "calibration.h"
 #include "messages.h"
+#include "task_parser.h"
 #include "tick_timer.h"
 #include "usb_communication.h"
 
@@ -22,6 +23,10 @@ static uint32_t tick_us = TICK_DEFAULT_US;
 
 // Ticks desde START
 static uint32_t tick_count = 0;
+
+// Tareas desplegadas por el host
+static Task tasks[MAX_TASKS];
+static size_t task_count = 0;
 
 static bool led = false;
 
@@ -58,13 +63,39 @@ static void handle_calibrate_req(const Frame *frame){
     usb_send(&reply);
 }
 
+// DEPLOY_TASKS: guarda las tareas que manda el host
+static void handle_deploy_tasks(const Frame *frame){
+    // se lee en una tabla aparte: si alguna línea está mala,
+    // las tareas anteriores quedan como estaban
+    static Task pending[MAX_TASKS];
+    size_t count = 0;
+
+    // sin calibrar, corriendo, o alguna tarea mal escrita
+    if (state == NodeState::Uncalibrated ||
+        state == NodeState::Running ||
+        !parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // todas las tareas son válidas: reemplazan a las anteriores
+    for (size_t i = 0; i < count; i++) {
+        tasks[i] = pending[i];
+    }
+    task_count = count;
+    state = NodeState::Configured;
+
+    send_ack(frame, StatusCode::Ok);
+}
+
 // START: tick 0 y arranca el timer
 static void handle_start(const Frame *frame){
-    // START no lleva carga, y hay que calibrar antes
-    // (luego también se exigirán tareas desplegadas)
+    // START no lleva carga, hay que calibrar y desplegar tareas antes,
+    // y no puede estar corriendo
     if (frame->length != 0 ||
         state == NodeState::Uncalibrated ||
-        state == NodeState::Running) {
+        state == NodeState::Running ||
+        task_count == 0) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -108,6 +139,10 @@ void node_handle_frame(const Frame *frame){
         handle_calibrate_req(frame);
         return;
     }
+    if (frame->type == (uint8_t)MessageType::DeployTasks) {
+        handle_deploy_tasks(frame);
+        return;
+    }
     if (frame->type == (uint8_t)MessageType::Start) {
         handle_start(frame);
         return;
@@ -122,7 +157,7 @@ void node_handle_frame(const Frame *frame){
         return;
     }
 
-    // DEPLOY_TASKS, SPORADIC_RELEASE (aún sin hacer) y tipos desconocidos:
+    // SPORADIC_RELEASE (aún sin hacer) y tipos desconocidos:
     // se responde "no implementado"
     send_ack(frame, StatusCode::NotImplemented);
 }
