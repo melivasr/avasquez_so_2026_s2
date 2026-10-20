@@ -1,0 +1,23 @@
+# PlatformIO: archivos generados y entorno local
+.pio/
+
+# VS Code: bases de datos y caché local
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+
+# Archivos del sistema operativo
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# Archivos temporales y de respaldo
+*.tmp
+*.bak
+*~
+
+# Logs
+*.log
