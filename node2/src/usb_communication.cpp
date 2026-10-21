@@ -13,17 +13,22 @@
 
 static FrameReceiver receiver;
 
-// Momento del último byte recibido y tramas descartadas por incompletas
+// Momento del último byte recibido
 static uint32_t last_byte_ms = 0;
-static uint32_t incomplete_frames = 0;
 
-// Errores ya convertidos en evento, para notar uno nuevo
-static uint32_t reported_crc_errors = 0;
-static uint32_t reported_length_errors = 0;
+// Tramas descartadas (CRC, largo o incompletas) desde el último reinicio.
+// Van en TICK_REPORT.
+static uint32_t bad_frames = 0;
+
+// Errores del receptor ya sumados a bad_frames, para notar uno nuevo
+static uint32_t counted_crc_errors = 0;
+static uint32_t counted_length_errors = 0;
 
 // Eventos pendientes de enviar y cuántos se perdieron por cola llena
+// (lost_events se avisa con EVENTS_LOST; dropped_events es el total)
 static EventQueue events;
 static uint32_t lost_events = 0;
+static uint32_t dropped_events = 0;
 
 void usb_send(const Frame *frame){
     static uint8_t out[FRAME_MAX_SIZE];
@@ -39,19 +44,13 @@ void usb_send(const Frame *frame){
     Serial.write(out, size);
 }
 
-// Si el receptor descartó una trama, se avisa con un evento
-static void report_receiver_errors(){
-    // CRC malo
-    if (receiver.crc_errors() != reported_crc_errors) {
-        reported_crc_errors = receiver.crc_errors();
-        usb_add_event(EventType::FrameError, NO_TASK, FRAME_ERROR_CRC);
-    }
+// Si el receptor descartó tramas (CRC malo o largo mayor a 512), se cuentan
+static void count_receiver_errors(){
+    bad_frames += receiver.crc_errors() - counted_crc_errors;
+    bad_frames += receiver.length_errors() - counted_length_errors;
 
-    // largo mayor a 512
-    if (receiver.length_errors() != reported_length_errors) {
-        reported_length_errors = receiver.length_errors();
-        usb_add_event(EventType::FrameError, NO_TASK, FRAME_ERROR_LENGTH);
-    }
+    counted_crc_errors = receiver.crc_errors();
+    counted_length_errors = receiver.length_errors();
 }
 
 bool usb_receive(Frame *frame){
@@ -61,7 +60,7 @@ bool usb_receive(Frame *frame){
         last_byte_ms = millis();
 
         const bool valid = receiver.push(byte, frame);
-        report_receiver_errors();
+        count_receiver_errors();
 
         // trama completa: los bytes que sigan se leen 
         if (valid) {
@@ -73,8 +72,7 @@ bool usb_receive(Frame *frame){
     if (receiver.in_progress() &&
         millis() - last_byte_ms >= FRAME_TIMEOUT_MS) {
         receiver.reset();
-        incomplete_frames++;
-        usb_add_event(EventType::FrameError, NO_TASK, FRAME_ERROR_LENGTH);
+        bad_frames++;
     }
 
     return false;
@@ -91,6 +89,7 @@ void usb_add_event(EventType type, uint32_t task_id, uint32_t value){
     // cola llena: no se espera, solo se cuenta el evento perdido
     if (!events.push(event)) {
         lost_events++;
+        dropped_events++;
     }
 }
 
@@ -124,4 +123,17 @@ void usb_send_events(){
         build_event(&message, &event);
         usb_send(&message);
     }
+}
+
+uint32_t usb_bad_frames(){
+    return bad_frames;
+}
+
+uint32_t usb_events_dropped(){
+    return dropped_events;
+}
+
+void usb_reset_counters(){
+    bad_frames = 0;
+    dropped_events = 0;
 }

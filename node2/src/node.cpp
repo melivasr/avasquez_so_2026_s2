@@ -30,7 +30,12 @@ static uint32_t ut_per_tick = 0;
 static uint32_t tick_count = 0;
 
 // Cada cuántos ticks se envía TICK_REPORT (llega en START; 0 = no se envía)
+// y en qué tick toca el próximo
 static uint16_t report_ticks = 0;
+static uint32_t next_report = 0;
+
+// Trabajos abortados por plazo vencido desde START (va en TICK_REPORT)
+static uint32_t deadline_misses = 0;
 
 // Tareas desplegadas por el host
 static Task tasks[MAX_TASKS];
@@ -137,6 +142,9 @@ static void handle_start(const Frame *frame){
 
     scheduler = chosen;
     report_ticks = requested_report_ticks;
+    next_report = requested_report_ticks;
+    deadline_misses = 0;
+    usb_reset_counters();
     running_task = NO_TASK;
     tick_count = 0;
     state = NodeState::Running;
@@ -209,6 +217,7 @@ void node_tick(){
         unidad_trabajo();
     }
     running_task = decision.task_id;
+    deadline_misses += decision.missed_count;
 
     tick_count++;
 
@@ -218,12 +227,22 @@ void node_tick(){
         digitalWrite(LED_BUILTIN, led);
     }
 
-    // cada report_ticks ticks se avisa al host (con 0 no se avisa)
-    if (report_ticks != 0 &&
-        tick_count % report_ticks == 0) {
+    // cada report_ticks ticks se avisa al host (con 0 no se avisa).
+    // El reporte lleva el tick recién procesado.
+    if (tick_report_due(report_ticks, now, &next_report)) {
         static Frame report;
+        TickReportData data;
 
-        build_tick_report(&report, tick_count, state, running_task);
+        data.tick = now;
+        data.deadline_misses = deadline_misses;
+        data.sporadic_ignored = 0; // todavía no hay tarea esporádica
+        data.ticks_lost = 0; // todavía no se detectan
+        data.events_dropped = usb_events_dropped();
+        data.bad_frames = usb_bad_frames();
+        data.max_busy_us = 0; // todavía no se mide
+        data.max_wake_latency_us = 0; // todavía no se mide
+
+        build_tick_report(&report, &data);
         usb_send(&report);
     }
 }

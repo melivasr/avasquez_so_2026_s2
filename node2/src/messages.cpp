@@ -11,6 +11,20 @@ static void write_u32_le(uint8_t *bytes, uint32_t value){
     bytes[3] = (value >> 24) & 0xFF;  // bits 24-31
 }
 
+// Escribe un número de 16 bits en 2 bytes, byte bajo primero (little-endian).
+static void write_u16_le(uint8_t *bytes, uint16_t value){
+    bytes[0] = value & 0xFF;          // bits 0-7
+    bytes[1] = (value >> 8) & 0xFF;   // bits 8-15
+}
+
+// Un contador de 32 bits en un campo de 16: si no cabe queda en 0xFFFF
+static uint16_t clamp_u16(uint32_t value){
+    if (value > 0xFFFFU) {
+        return 0xFFFFU;
+    }
+    return (uint16_t)value;
+}
+
 // Lee un número de 16 bits de 2 bytes, byte bajo primero (little-endian).
 static uint16_t read_u16_le(const uint8_t *bytes){
     return (uint16_t)(bytes[0] | (bytes[1] << 8));
@@ -77,14 +91,34 @@ void build_ack(Frame *frame, uint8_t acked_type, StatusCode status){
     frame->payload[1] = (uint8_t)status;
 }
 
-// TICK_REPORT: [tick (4)] [state (1)] [running_task_id (4)]
-void build_tick_report(Frame *frame, uint32_t tick, NodeState state, uint32_t running_task_id){
+// TICK_REPORT: [tick (4)] [misses (2)] [sporadic_ignored (2)] [ticks_lost (2)]
+//              [events_dropped (2)] [bad_frames (2)] [max_busy_us (4)]
+//              [max_wake_latency_us (4)]
+void build_tick_report(Frame *frame, const TickReportData *data){
     frame->type = (uint8_t)MessageType::TickReport;
     frame->length = TICK_REPORT_SIZE;
 
-    write_u32_le(&frame->payload[0], tick);
-    frame->payload[4] = (uint8_t)state;
-    write_u32_le(&frame->payload[5], running_task_id);
+    write_u32_le(&frame->payload[0], data->tick);
+    write_u16_le(&frame->payload[4], clamp_u16(data->deadline_misses));
+    write_u16_le(&frame->payload[6], clamp_u16(data->sporadic_ignored));
+    write_u16_le(&frame->payload[8], clamp_u16(data->ticks_lost));
+    write_u16_le(&frame->payload[10], clamp_u16(data->events_dropped));
+    write_u16_le(&frame->payload[12], clamp_u16(data->bad_frames));
+    write_u32_le(&frame->payload[14], data->max_busy_us);
+    write_u32_le(&frame->payload[18], data->max_wake_latency_us);
+}
+
+bool tick_report_due(uint16_t period, uint32_t tick, uint32_t *next_report){
+    // sin período, sin salida o todavía no llega al siguiente reporte
+    if (period == 0 ||
+        !next_report ||
+        tick < *next_report) {
+        return false;
+    }
+
+    // el siguiente múltiplo de period después de este tick
+    *next_report = (tick / period + 1) * period;
+    return true;
 }
 
 // EVENT: [tick (4)] [event_type (1)] [task_id (4)] [value (4)]
