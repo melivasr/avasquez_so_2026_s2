@@ -10,20 +10,20 @@
 #define CALIBRATE_REQ_SIZE 4U // tick_us
 #define CALIBRATE_RESP_SIZE 4U // ut_per_tick 
 #define ACK_SIZE 2U // tipo confirmado + status
-#define TICK_REPORT_SIZE 9U // tick + state + running_task_id
-#define EVENT_SIZE 13U // tick + event_type + task_id + value
+#define TICK_REPORT_SIZE 22U // tick + 5 contadores de 2 bytes + 2 tiempos de 4 bytes
+#define EVENT_RECORD_SIZE 9U // tipo + tick + id + arg
+#define EVENT_MAX_PER_FRAME 56U // 1 + 56 * 9 = 505 bytes, cabe en 512
+#define START_SIZE 3U // algoritmo + report_ticks
 
-#define FRAME_ERROR_CRC 1U    // CRC no coincide
-#define FRAME_ERROR_LENGTH 2U // largo mayor a 512 o trama incompleta
-
-// Códigos de estado del ACK
+// Códigos de estado del ACK 
 enum class StatusCode : uint8_t {
-    Ok = 0,    // comando aceptado
-    Error = 1, // carga inválida o comando no válido en el estado actual
+    Ok = 0,  // comando aceptado
+    Error = 1,  // carga inválida o rechazada 
     NotImplemented = 2, // tipo desconocido o que el nodo todavía no maneja
+    BadState = 3,       // comando no válido en el estado actual (NODE_BAD_STATE)
 };
 
-// Estado del nodo (se envía en TICK_REPORT)
+// Estado del nodo
 enum class NodeState : uint8_t {
     Uncalibrated = 0,
     Calibrated = 1,
@@ -32,6 +32,16 @@ enum class NodeState : uint8_t {
     Stopped = 4,
     Error = 5,
 };
+
+// Algoritmo de calendarización 
+enum class Algorithm : uint8_t {
+    RMS = 0,
+    EDF = 1,
+};
+
+// Lee un START: algoritmo y cada cuántos ticks se manda TICK_REPORT
+// (0 = no se manda). 
+bool parse_start(const Frame *frame, Algorithm *algorithm, uint16_t *report_ticks);
 
 // Lee tick_us de un CALIBRATE_REQ.
 // Devuelve false si no es CALIBRATE_REQ o la carga no mide 4 bytes.
@@ -43,8 +53,28 @@ void build_calibrate_resp(Frame *frame, uint32_t ut_per_tick);
 // Llena frame con un ACK que confirma el mensaje de tipo acked_type
 void build_ack(Frame *frame, uint8_t acked_type, StatusCode status);
 
-// Llena frame con un TICK_REPORT (tick desde START, estado y tarea en ejecución)
-void build_tick_report(Frame *frame, uint32_t tick, NodeState state, uint32_t running_task_id);
+// Lo que lleva un TICK_REPORT. Los contadores
+// se cuentan desde START; en la trama van topados a 0xFFFF.
+struct TickReportData {
+    uint32_t tick; // tick recién procesado
+    uint32_t deadline_misses; // trabajos abortados por plazo vencido
+    uint32_t sporadic_ignored; // pulsaciones antes del intervalo mínimo
+    uint32_t ticks_lost; // ticks que no se alcanzaron a procesar
+    uint32_t events_dropped; // eventos descartados por cola llena
+    uint32_t bad_frames; // tramas descartadas (CRC, largo o incompletas)
+    uint32_t max_busy_us; // lo más que tardó un tick
+    uint32_t max_wake_latency_us; // lo más que tardó en atenderse un tick
+};
 
-// Llena frame con un EVENT a partir de un evento de la cola
-void build_event(Frame *frame, const NodeEvent *event);
+// Llena frame con un TICK_REPORT
+void build_tick_report(Frame *frame, const TickReportData *data);
+
+// true si en el tick toca mandar TICK_REPORT, y deja en next_report el
+// siguiente múltiplo de period. Con period 0 nunca toca.
+bool tick_report_due(uint16_t period, uint32_t tick, uint32_t *next_report);
+
+// Saca de la cola hasta max_events eventos (y nunca más de
+// EVENT_MAX_PER_FRAME) y llena frame con un EVENT:
+// [cantidad (1)] [registros de 9 bytes: tipo, tick, id, arg]
+// Devuelve cuántos eventos puso; con 0 no toca frame.
+size_t build_event_batch(Frame *frame, EventQueue *queue, size_t max_events);

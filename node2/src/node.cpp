@@ -3,12 +3,14 @@
 #include "node.h"
 #include "calibration.h"
 #include "messages.h"
+#include "scheduler/scheduler_edf.h"
+#include "scheduler/scheduler_rms.h"
 #include "task_parser.h"
 #include "tick_timer.h"
 #include "usb_communication.h"
-
-// Cada cuántos ticks se manda TICK_REPORT (luego vendrá en DEPLOY_TASKS)
-#define REPORT_EVERY_TICKS 100U
+extern "C" {
+#include "ut.h"
+}
 
 // Cada cuántos ticks cambia el LED (50 x 10 ms = medio segundo)
 #define LED_EVERY_TICKS 50U
@@ -21,12 +23,33 @@
 static NodeState state = NodeState::Uncalibrated;
 static uint32_t tick_us = TICK_DEFAULT_US;
 
+// UT por tick medidas en la última calibración (s_n)
+static uint32_t ut_per_tick = 0;
+
 // Ticks desde START
 static uint32_t tick_count = 0;
+
+// Cada cuántos ticks se envía TICK_REPORT (llega en START; 0 = no se envía)
+// y en qué tick toca el próximo
+static uint16_t report_ticks = 0;
+static uint32_t next_report = 0;
+
+// Trabajos abortados por plazo vencido desde START (va en TICK_REPORT)
+static uint32_t deadline_misses = 0;
+
+// Medidas de tiempo desde START (van en TICK_REPORT)
+static uint32_t ticks_lost = 0; // ticks que no se alcanzaron a procesar
+static uint32_t max_busy_us = 0; // lo más que tardó en procesarse un tick
+static uint32_t max_wake_latency_us = 0; // lo más que tardó en atenderse un tick
 
 // Tareas desplegadas por el host
 static Task tasks[MAX_TASKS];
 static size_t task_count = 0;
+
+// Calendarizadores. En START se elige uno según el algoritmo que trae
+static SchedulerRms scheduler_rms;
+static SchedulerEdf scheduler_edf;
+static Scheduler *scheduler = nullptr;
 
 static bool led = false;
 
@@ -43,19 +66,30 @@ static void handle_calibrate_req(const Frame *frame){
     static Frame reply;
     uint32_t requested_us = 0;
 
-    // carga inválida, tick fuera de rango o el calendarizador corriendo:
-    // el error va en un ACK
+    // carga inválida o tick fuera de rango: el error va en un ACK
     if (!parse_calibrate_req(frame, &requested_us) ||
         requested_us < TICK_MIN_US ||
-        requested_us > TICK_MAX_US ||
-        state == NodeState::Running) {
+        requested_us > TICK_MAX_US) {
         send_ack(frame, StatusCode::Error);
         return;
     }
 
-    const uint32_t ut_per_tick = calibration_measure(requested_us);
+    // no se calibra con el calendarizador corriendo
+    if (state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    const uint32_t measured = calibration_measure(requested_us);
+
+    // no cupo ni una UT en el tick: se rechaza y queda la calibración anterior
+    if (measured == 0) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
 
     // se guarda el tick para usarlo en START
+    ut_per_tick = measured;
     tick_us = requested_us;
     state = NodeState::Calibrated;
 
@@ -70,10 +104,14 @@ static void handle_deploy_tasks(const Frame *frame){
     static Task pending[MAX_TASKS];
     size_t count = 0;
 
-    // sin calibrar, corriendo, o alguna tarea mal escrita
-    if (state == NodeState::Uncalibrated ||
-        state == NodeState::Running ||
-        !parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+    // no se cambian las tareas con el calendarizador corriendo
+    if (state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    // alguna tarea mal escrita (se puede desplegar antes de calibrar)
+    if (!parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -83,19 +121,84 @@ static void handle_deploy_tasks(const Frame *frame){
         tasks[i] = pending[i];
     }
     task_count = count;
-    state = NodeState::Configured;
+
+    // sin calibrar sigue faltando la calibración para START
+    if (state != NodeState::Uncalibrated) {
+        state = NodeState::Configured;
+    }
 
     send_ack(frame, StatusCode::Ok);
 }
 
+// Procesa el tick indicado: calendarizador, trabajo y eventos
+static void process_tick(uint32_t now){
+    const TickDecision decision = scheduler->tick(now);
+
+    // ejecutar el tramo de trabajo de este tick
+    for (uint32_t i = 0; i < decision.units; i++) {
+        unidad_trabajo();
+    }
+    deadline_misses += decision.missed_count;
+
+    // los eventos del tick quedan en la cola; salen en segundo plano
+    for (size_t i = 0; i < decision.event_count; i++) {
+        const NodeEvent &event = decision.events[i];
+        usb_add_event(event.type, event.tick, event.task_id, event.value);
+    }
+
+    // cada LED_EVERY_TICKS ticks se cambia el LED
+    if ((now + 1) % LED_EVERY_TICKS == 0) {
+        led = !led;
+        digitalWrite(LED_BUILTIN, led);
+    }
+}
+
+// Si toca, deja listo el TICK_REPORT del tick recién procesado
+// (cada report_ticks ticks; con 0 no se avisa)
+static void report_if_due(uint32_t now){
+    if (tick_report_due(report_ticks, now, &next_report)) {
+        static Frame report;
+        TickReportData data;
+
+        data.tick = now;
+        data.deadline_misses = deadline_misses;
+        data.sporadic_ignored = scheduler->sporadic_ignored();
+        data.ticks_lost = ticks_lost;
+        data.events_dropped = usb_events_dropped();
+        data.bad_frames = usb_bad_frames();
+        data.max_busy_us = max_busy_us;
+        data.max_wake_latency_us = max_wake_latency_us;
+
+        build_tick_report(&report, &data);
+        usb_post_report(&report);
+    }
+}
+
 // START: tick 0 y arranca el timer
 static void handle_start(const Frame *frame){
-    // START no lleva carga, hay que calibrar y desplegar tareas antes,
-    // y no puede estar corriendo
-    if (frame->length != 0 ||
-        state == NodeState::Uncalibrated ||
-        state == NodeState::Running ||
-        task_count == 0) {
+    Algorithm algorithm;
+    uint16_t requested_report_ticks = 0;
+
+    // carga inválida
+    if (!parse_start(frame, &algorithm, &requested_report_ticks)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // falta calibrar o ya está corriendo. Sin tareas desplegadas
+    // sí arranca y queda esperando
+    if (state == NodeState::Uncalibrated ||
+        state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    // el calendarizador arranca de cero con las tareas desplegadas
+    Scheduler *chosen = &scheduler_edf;
+    if (algorithm == Algorithm::RMS) {
+        chosen = &scheduler_rms;
+    }
+    if (!chosen->configure(tasks, task_count, ut_per_tick)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -106,17 +209,35 @@ static void handle_start(const Frame *frame){
         return;
     }
 
-    tick_count = 0;
+    scheduler = chosen;
+    report_ticks = requested_report_ticks;
+    next_report = requested_report_ticks;
+    deadline_misses = 0;
+    ticks_lost = 0;
+    max_busy_us = 0;
+    max_wake_latency_us = 0;
+    usb_reset_counters();
+    usb_clear_events();
     state = NodeState::Running;
     send_ack(frame, StatusCode::Ok);
+
+    // el tick 0 se procesa ya; la primera alarma
+    // del timer marca el tick 1
+    process_tick(0);
+    tick_count = 1;
 }
 
 // STOP: detiene el timer
 static void handle_stop(const Frame *frame){
-    // STOP no lleva carga, y solo se detiene si está corriendo
-    if (frame->length != 0 ||
-        state != NodeState::Running) {
+    // STOP no lleva carga
+    if (frame->length != 0) {
         send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // solo se detiene si está corriendo
+    if (state != NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
         return;
     }
 
@@ -126,6 +247,36 @@ static void handle_stop(const Frame *frame){
     led = false;
     digitalWrite(LED_BUILTIN, led);
 
+    // el ACK sale después de los eventos pendientes
+    // (se envían en segundo plano, sin esperar aquí)
+    static Frame reply;
+    build_ack(&reply, frame->type, StatusCode::Ok);
+    usb_post_last(&reply);
+}
+
+// SPORADIC_RELEASE: el host pide liberar la tarea esporádica (como el botón).
+// El ACK Ok solo dice que la pulsación quedó registrada; en el próximo tick
+// el calendarizador decide si libera o ignora, y lo avisa con un evento.
+static void handle_sporadic_release(const Frame *frame){
+    // SPORADIC_RELEASE no lleva carga
+    if (frame->length != 0) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // solo con el calendarizador corriendo
+    if (state != NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    // el nodo no tiene tarea esporádica
+    if (!scheduler->has_sporadic()) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    scheduler->sporadic_press(1);
     send_ack(frame, StatusCode::Ok);
 }
 
@@ -151,33 +302,65 @@ void node_handle_frame(const Frame *frame){
         handle_stop(frame);
         return;
     }
+    if (frame->type == (uint8_t)MessageType::SporadicRelease) {
+        handle_sporadic_release(frame);
+        return;
+    }
 
     // un ACK del host no se confirma (si no, se responderían para siempre)
     if (frame->type == (uint8_t)MessageType::Ack) {
         return;
     }
 
-    // SPORADIC_RELEASE (aún sin hacer) y tipos desconocidos:
-    // se responde "no implementado"
+    // tipos desconocidos: se responde "no implementado"
     send_ack(frame, StatusCode::NotImplemented);
 }
 
+
 void node_tick(){
+    // solo con el calendarizador corriendo
+    if (state != NodeState::Running) {
+        return;
+    }
+
+    // primero el timer y después la hora: si la alarma entra entre las dos
+    // lecturas, last_us igual queda antes de start_us y la resta no da negativa
+    const uint32_t reached = tick_timer_count();
+    const uint32_t last_us = tick_timer_last_us();
+    const uint32_t start_us = micros();
+
+    // el timer todavía no marcó el tick que sigue
+    if (reached < tick_count) {
+        return;
+    }
+
+    // cuánto tardó el ciclo principal en atender la alarma
+    const uint32_t latency = start_us - last_us;
+    if (latency > max_wake_latency_us) {
+        max_wake_latency_us = latency;
+    }
+
+    // se atrasó: los ticks que faltaron se cuentan y se salta al actual
+    // 
+    if (reached > tick_count) {
+        const uint32_t lost = reached - tick_count;
+        ticks_lost += lost;
+        usb_add_event(EventType::TickLost, reached, NO_TASK,
+                      (uint16_t)(lost > 0xFFFFU ? 0xFFFFU : lost));
+        tick_count = reached;
+    }
+
+    const uint32_t now = tick_count;
     tick_count++;
+    process_tick(now);
 
-    // cada LED_EVERY_TICKS ticks se cambia el LED
-    if (tick_count % LED_EVERY_TICKS == 0) {
-        led = !led;
-        digitalWrite(LED_BUILTIN, led);
+    // cuánto tardó este tick; se mide antes del reporte para que lo incluya
+    const uint32_t busy = micros() - start_us;
+    if (busy > max_busy_us) {
+        max_busy_us = busy;
     }
 
-    // cada REPORT_EVERY_TICKS ticks se avisa al host
-    if (tick_count % REPORT_EVERY_TICKS == 0) {
-        static Frame report;
-
-        build_tick_report(&report, tick_count, state, NO_TASK);
-        usb_send(&report);
-    }
+    report_if_due(now);
 }
 
 uint32_t node_tick_count(){
