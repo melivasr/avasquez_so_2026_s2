@@ -5,7 +5,7 @@
 
 #include "protocol.h"
 
-// Configura el LED
+// Configura los LEDs y el botón
 void node_setup();
 
 // Atiende una trama válida que llegó del host
