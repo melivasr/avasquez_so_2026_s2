@@ -2,6 +2,7 @@
 
 #include "node.h"
 #include "calibration.h"
+#include "hardware.h"
 #include "messages.h"
 #include "scheduler/scheduler_edf.h"
 #include "scheduler/scheduler_rms.h"
@@ -52,6 +53,12 @@ static SchedulerEdf scheduler_edf;
 static Scheduler *scheduler = nullptr;
 
 static bool led = false;
+
+// El LED de plazo perdido se enciende con cada MISS y se apaga solo
+// después de este tiempo (cada MISS nuevo lo vuelve a contar)
+#define MISS_PULSE_MS 200U
+static bool miss_lit = false;
+static uint32_t miss_on_ms = 0;
 
 // Responde un ACK al mensaje recibido
 static void send_ack(const Frame *frame, StatusCode status){
@@ -130,8 +137,25 @@ static void handle_deploy_tasks(const Frame *frame){
     send_ack(frame, StatusCode::Ok);
 }
 
+// La tarea según su posición;
+// 0 si no hay tarea. Es lo que muestran los LEDs.
+static uint32_t slot_for_id(uint32_t task_id){
+    for (size_t i = 0; i < task_count; i++) {
+        if (tasks[i].id == task_id) {
+            return (uint32_t)(i + 1);
+        }
+    }
+    return 0;
+}
+
 // Procesa el tick indicado: calendarizador, trabajo y eventos
 static void process_tick(uint32_t now){
+    // las pulsaciones nuevas del botón se atienden en este tick
+    const uint32_t presses = hardware_take_presses();
+    if (presses > 0) {
+        scheduler->sporadic_press(presses);
+    }
+
     const TickDecision decision = scheduler->tick(now);
 
     // ejecutar el tramo de trabajo de este tick
@@ -140,10 +164,27 @@ static void process_tick(uint32_t now){
     }
     deadline_misses += decision.missed_count;
 
-    // los eventos del tick quedan en la cola; salen en segundo plano
+    // los eventos del tick quedan en la cola; salen en segundo plano.
+    // Los LEDs siguen a los eventos: SWITCH cambia y MISS
+    // enciende el LED de plazo perdido por MISS_PULSE_MS
     for (size_t i = 0; i < decision.event_count; i++) {
         const NodeEvent &event = decision.events[i];
         usb_add_event(event.type, event.tick, event.task_id, event.value);
+
+        if (event.type == EventType::Switch) {
+            hardware_show_slot(slot_for_id(event.task_id));
+        } else if (event.type == EventType::Miss) {
+            hardware_set_miss(true);
+            miss_lit = true;
+            miss_on_ms = millis();
+        }
+    }
+
+    // ya pasó el tiempo desde el último MISS: se apaga
+    if (miss_lit &&
+        millis() - miss_on_ms >= MISS_PULSE_MS) {
+        hardware_set_miss(false);
+        miss_lit = false;
     }
 
     // cada LED_EVERY_TICKS ticks se cambia el LED
@@ -218,6 +259,12 @@ static void handle_start(const Frame *frame){
     max_wake_latency_us = 0;
     usb_reset_counters();
     usb_clear_events();
+
+    hardware_show_slot(0);
+    hardware_set_miss(false);
+    miss_lit = false;
+    hardware_take_presses();
+
     state = NodeState::Running;
     send_ack(frame, StatusCode::Ok);
 
@@ -246,6 +293,12 @@ static void handle_stop(const Frame *frame){
 
     led = false;
     digitalWrite(LED_BUILTIN, led);
+
+    // ya no corre ninguna tarea y sin ticks el pulso de plazo perdido
+    // no se apagaría solo: todo apagado
+    hardware_show_slot(0);
+    hardware_set_miss(false);
+    miss_lit = false;
 
     // el ACK sale después de los eventos pendientes
     // (se envían en segundo plano, sin esperar aquí)
@@ -281,8 +334,10 @@ static void handle_sporadic_release(const Frame *frame){
 }
 
 void node_setup(){
-    // LED integrado (GPIO 25 en la Pico H)
     pinMode(LED_BUILTIN, OUTPUT);
+
+    // LEDs del binario y de plazo perdido, y botón de la tarea esporádica
+    hardware_setup();
 }
 
 void node_handle_frame(const Frame *frame){
