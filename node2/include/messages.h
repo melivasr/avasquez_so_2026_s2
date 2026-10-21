@@ -11,7 +11,8 @@
 #define CALIBRATE_RESP_SIZE 4U // ut_per_tick 
 #define ACK_SIZE 2U // tipo confirmado + status
 #define TICK_REPORT_SIZE 22U // tick + 5 contadores de 2 bytes + 2 tiempos de 4 bytes
-#define EVENT_SIZE 13U // tick + event_type + task_id + value
+#define EVENT_RECORD_SIZE 9U // tipo + tick + id + arg
+#define EVENT_MAX_PER_FRAME 56U // 1 + 56 * 9 = 505 bytes, cabe en 512
 #define START_SIZE 3U // algoritmo + report_ticks
 
 // Códigos de estado del ACK 
@@ -72,5 +73,8 @@ void build_tick_report(Frame *frame, const TickReportData *data);
 // siguiente múltiplo de period. Con period 0 nunca toca.
 bool tick_report_due(uint16_t period, uint32_t tick, uint32_t *next_report);
 
-// Llena frame con un EVENT a partir de un evento de la cola
-void build_event(Frame *frame, const NodeEvent *event);
+// Saca de la cola hasta max_events eventos (y nunca más de
+// EVENT_MAX_PER_FRAME) y llena frame con un EVENT:
+// [cantidad (1)] [registros de 9 bytes: tipo, tick, id, arg]
+// Devuelve cuántos eventos puso; con 0 no toca frame.
+size_t build_event_batch(Frame *frame, EventQueue *queue, size_t max_events);

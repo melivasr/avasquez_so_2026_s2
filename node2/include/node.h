@@ -11,8 +11,9 @@ void node_setup();
 // Atiende una trama válida que llegó del host
 void node_handle_frame(const Frame *frame);
 
-// Lo que se hace en cada tick del timer
+// Si el timer marcó un tick nuevo, lo procesa. Se llama en cada vuelta
+// del ciclo principal; sin tick nuevo no hace nada.
 void node_tick();
 
-// Ticks desde START (marca de tiempo de los eventos)
+// Próximo tick a procesar, contado desde START
 uint32_t node_tick_count();

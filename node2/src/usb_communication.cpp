@@ -24,11 +24,19 @@ static uint32_t bad_frames = 0;
 static uint32_t counted_crc_errors = 0;
 static uint32_t counted_length_errors = 0;
 
-// Eventos pendientes de enviar y cuántos se perdieron por cola llena
-// (lost_events se avisa con EVENTS_LOST; dropped_events es el total)
+// Eventos pendientes de enviar y cuántos se descartaron por cola llena
 static EventQueue events;
-static uint32_t lost_events = 0;
 static uint32_t dropped_events = 0;
+
+// TICK_REPORT que espera a que salgan los eventos anteriores.
+// Si llega otro antes de enviarlo, el nuevo reemplaza al viejo.
+static Frame pending_report;
+static bool report_pending = false;
+
+// Trama que sale al final, después de los eventos y el reporte pendientes
+// (el ACK de STOP, para que el host reciba todo lo anterior primero)
+static Frame pending_last;
+static bool last_pending = false;
 
 void usb_send(const Frame *frame){
     static uint8_t out[FRAME_MAX_SIZE];
@@ -78,50 +86,61 @@ bool usb_receive(Frame *frame){
     return false;
 }
 
-void usb_add_event(EventType type, uint32_t task_id, uint32_t value){
+void usb_add_event(EventType type, uint32_t tick, uint16_t task_id, uint16_t value){
     NodeEvent event;
 
-    event.tick = node_tick_count();
+    event.tick = tick;
     event.type = type;
     event.task_id = task_id;
     event.value = value;
 
-    // cola llena: no se espera, solo se cuenta el evento perdido
+    // cola llena: no se espera, se descarta el nuevo y se cuenta
     if (!events.push(event)) {
-        lost_events++;
         dropped_events++;
     }
 }
 
+void usb_post_report(const Frame *report){
+    pending_report = *report;
+    report_pending = true;
+}
+
+void usb_post_last(const Frame *frame){
+    pending_last = *frame;
+    last_pending = true;
+}
+
 void usb_send_events(){
     static Frame message;
-    const int event_frame_size = FRAME_MIN_SIZE + EVENT_SIZE;
-
-    // si se perdieron eventos y ya hay espacio, se avisa cuántos
-    if (lost_events > 0 &&
-        !events.full()) {
-        NodeEvent lost;
-
-        lost.tick = node_tick_count();
-        lost.type = EventType::EventsLost;
-        lost.task_id = NO_TASK;
-        lost.value = lost_events;
-
-        events.push(lost);
-        lost_events = 0;
-    }
 
     while (!events.empty()) {
-        // el USB no tiene espacio: el evento queda en la cola para después
-        if (Serial.availableForWrite() < event_frame_size) {
+        // se arma el lote con los eventos que caben en el espacio libre del USB
+        const int space = Serial.availableForWrite() - (int)FRAME_MIN_SIZE - 1;
+        if (space < (int)EVENT_RECORD_SIZE) {
+            // sin espacio: los eventos quedan en la cola para después
             return;
         }
 
-        NodeEvent event;
-
-        events.pop(event);
-        build_event(&message, &event);
+        build_event_batch(&message, &events, (size_t)space / EVENT_RECORD_SIZE);
         usb_send(&message);
+    }
+
+    // el reporte sale después de los eventos 
+    if (report_pending) {
+        if (Serial.availableForWrite() < (int)(FRAME_MIN_SIZE + pending_report.length)) {
+            return;
+        }
+        usb_send(&pending_report);
+        report_pending = false;
+    }
+
+    // y al final la trama que tenía que esperar a todo lo anterior
+    if (last_pending) {
+        if (Serial.availableForWrite() < (int)(FRAME_MIN_SIZE + pending_last.length)) {
+            return;
+        }
+        usb_send(&pending_last);
+        last_pending = false;
     }
 }
 
@@ -136,4 +155,12 @@ uint32_t usb_events_dropped(){
 void usb_reset_counters(){
     bad_frames = 0;
     dropped_events = 0;
+}
+
+void usb_clear_events(){
+    NodeEvent event;
+
+    while (events.pop(event)) {
+    }
+    report_pending = false;
 }

@@ -1,6 +1,7 @@
-
 // CALIBRACIÓN
-// Mide con micros() cuántas UT caben en un tick.
+// Mide con micros() cuántas UT caben en un tick: cuenta las UT de una
+// ventana de varios ticks, saca el promedio por tick y deja un margen
+// para el calendarizador y el envío de eventos.
 #include <Arduino.h>
 
 #include "calibration.h"
@@ -8,21 +9,22 @@ extern "C" {
 #include "ut.h"
 }
 
+// Ticks que dura la medición y porcentaje del tick que se reporta
+#define CAL_WINDOW_TICKS 50U
+#define CAL_MARGIN_PERCENT 80U
+
 uint32_t calibration_measure(uint32_t tick_us){
-    uint32_t ut_per_tick = 0;
+    // con tick de 1 s la ventana es de 50 s: todavía cabe en 32 bits
+    const uint32_t window_us = tick_us * CAL_WINDOW_TICKS;
     const uint32_t start_us = micros();
-    uint32_t elapsed_us = 0;
+    uint64_t ut_count = 0;
 
-    // Ejecutar UT hasta que se acabe el tick
-    while (elapsed_us < tick_us) {
+    // Ejecutar UT hasta que se acabe la ventana
+    while (micros() - start_us < window_us) {
         unidad_trabajo();
-        elapsed_us = micros() - start_us;
-
-        // solo cuenta si terminó dentro del tick
-        if (elapsed_us <= tick_us) {
-            ut_per_tick++;
-        }
+        ut_count++;
     }
 
-    return ut_per_tick;
+    // promedio por tick, con el margen ya aplicado
+    return (uint32_t)((ut_count * CAL_MARGIN_PERCENT) / (100ULL * CAL_WINDOW_TICKS));
 }

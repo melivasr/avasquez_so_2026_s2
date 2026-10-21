@@ -37,6 +37,11 @@ static uint32_t next_report = 0;
 // Trabajos abortados por plazo vencido desde START (va en TICK_REPORT)
 static uint32_t deadline_misses = 0;
 
+// Medidas de tiempo desde START (van en TICK_REPORT)
+static uint32_t ticks_lost = 0; // ticks que no se alcanzaron a procesar
+static uint32_t max_busy_us = 0; // lo más que tardó en procesarse un tick
+static uint32_t max_wake_latency_us = 0; // lo más que tardó en atenderse un tick
+
 // Tareas desplegadas por el host
 static Task tasks[MAX_TASKS];
 static size_t task_count = 0;
@@ -45,9 +50,6 @@ static size_t task_count = 0;
 static SchedulerRms scheduler_rms;
 static SchedulerEdf scheduler_edf;
 static Scheduler *scheduler = nullptr;
-
-// Tarea que corrió en el último tick (NO_TASK si ninguna)
-static uint32_t running_task = NO_TASK;
 
 static bool led = false;
 
@@ -128,6 +130,50 @@ static void handle_deploy_tasks(const Frame *frame){
     send_ack(frame, StatusCode::Ok);
 }
 
+// Procesa el tick indicado: calendarizador, trabajo y eventos
+static void process_tick(uint32_t now){
+    const TickDecision decision = scheduler->tick(now);
+
+    // ejecutar el tramo de trabajo de este tick
+    for (uint32_t i = 0; i < decision.units; i++) {
+        unidad_trabajo();
+    }
+    deadline_misses += decision.missed_count;
+
+    // los eventos del tick quedan en la cola; salen en segundo plano
+    for (size_t i = 0; i < decision.event_count; i++) {
+        const NodeEvent &event = decision.events[i];
+        usb_add_event(event.type, event.tick, event.task_id, event.value);
+    }
+
+    // cada LED_EVERY_TICKS ticks se cambia el LED
+    if ((now + 1) % LED_EVERY_TICKS == 0) {
+        led = !led;
+        digitalWrite(LED_BUILTIN, led);
+    }
+}
+
+// Si toca, deja listo el TICK_REPORT del tick recién procesado
+// (cada report_ticks ticks; con 0 no se avisa)
+static void report_if_due(uint32_t now){
+    if (tick_report_due(report_ticks, now, &next_report)) {
+        static Frame report;
+        TickReportData data;
+
+        data.tick = now;
+        data.deadline_misses = deadline_misses;
+        data.sporadic_ignored = scheduler->sporadic_ignored();
+        data.ticks_lost = ticks_lost;
+        data.events_dropped = usb_events_dropped();
+        data.bad_frames = usb_bad_frames();
+        data.max_busy_us = max_busy_us;
+        data.max_wake_latency_us = max_wake_latency_us;
+
+        build_tick_report(&report, &data);
+        usb_post_report(&report);
+    }
+}
+
 // START: tick 0 y arranca el timer
 static void handle_start(const Frame *frame){
     Algorithm algorithm;
@@ -167,11 +213,18 @@ static void handle_start(const Frame *frame){
     report_ticks = requested_report_ticks;
     next_report = requested_report_ticks;
     deadline_misses = 0;
+    ticks_lost = 0;
+    max_busy_us = 0;
+    max_wake_latency_us = 0;
     usb_reset_counters();
-    running_task = NO_TASK;
-    tick_count = 0;
+    usb_clear_events();
     state = NodeState::Running;
     send_ack(frame, StatusCode::Ok);
+
+    // el tick 0 se procesa ya; la primera alarma
+    // del timer marca el tick 1
+    process_tick(0);
+    tick_count = 1;
 }
 
 // STOP: detiene el timer
@@ -194,6 +247,36 @@ static void handle_stop(const Frame *frame){
     led = false;
     digitalWrite(LED_BUILTIN, led);
 
+    // el ACK sale después de los eventos pendientes
+    // (se envían en segundo plano, sin esperar aquí)
+    static Frame reply;
+    build_ack(&reply, frame->type, StatusCode::Ok);
+    usb_post_last(&reply);
+}
+
+// SPORADIC_RELEASE: el host pide liberar la tarea esporádica (como el botón).
+// El ACK Ok solo dice que la pulsación quedó registrada; en el próximo tick
+// el calendarizador decide si libera o ignora, y lo avisa con un evento.
+static void handle_sporadic_release(const Frame *frame){
+    // SPORADIC_RELEASE no lleva carga
+    if (frame->length != 0) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // solo con el calendarizador corriendo
+    if (state != NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    // el nodo no tiene tarea esporádica
+    if (!scheduler->has_sporadic()) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    scheduler->sporadic_press(1);
     send_ack(frame, StatusCode::Ok);
 }
 
@@ -219,60 +302,65 @@ void node_handle_frame(const Frame *frame){
         handle_stop(frame);
         return;
     }
+    if (frame->type == (uint8_t)MessageType::SporadicRelease) {
+        handle_sporadic_release(frame);
+        return;
+    }
 
     // un ACK del host no se confirma (si no, se responderían para siempre)
     if (frame->type == (uint8_t)MessageType::Ack) {
         return;
     }
 
-    // SPORADIC_RELEASE (aún sin hacer) y tipos desconocidos:
-    // se responde "no implementado"
+    // tipos desconocidos: se responde "no implementado"
     send_ack(frame, StatusCode::NotImplemented);
 }
 
+
 void node_tick(){
-    // el timer solo corre después de START, que elige el calendarizador
-    if (scheduler == nullptr) {
+    // solo con el calendarizador corriendo
+    if (state != NodeState::Running) {
         return;
     }
 
-    // el calendarizador numera los ticks desde 0: el primero es el de START
+    // primero el timer y después la hora: si la alarma entra entre las dos
+    // lecturas, last_us igual queda antes de start_us y la resta no da negativa
+    const uint32_t reached = tick_timer_count();
+    const uint32_t last_us = tick_timer_last_us();
+    const uint32_t start_us = micros();
+
+    // el timer todavía no marcó el tick que sigue
+    if (reached < tick_count) {
+        return;
+    }
+
+    // cuánto tardó el ciclo principal en atender la alarma
+    const uint32_t latency = start_us - last_us;
+    if (latency > max_wake_latency_us) {
+        max_wake_latency_us = latency;
+    }
+
+    // se atrasó: los ticks que faltaron se cuentan y se salta al actual
+    // 
+    if (reached > tick_count) {
+        const uint32_t lost = reached - tick_count;
+        ticks_lost += lost;
+        usb_add_event(EventType::TickLost, reached, NO_TASK,
+                      (uint16_t)(lost > 0xFFFFU ? 0xFFFFU : lost));
+        tick_count = reached;
+    }
+
     const uint32_t now = tick_count;
-    const TickDecision decision = scheduler->tick(now);
-
-    // ejecutar el tramo de trabajo de este tick
-    for (uint32_t i = 0; i < decision.units; i++) {
-        unidad_trabajo();
-    }
-    running_task = decision.task_id;
-    deadline_misses += decision.missed_count;
-
     tick_count++;
+    process_tick(now);
 
-    // cada LED_EVERY_TICKS ticks se cambia el LED
-    if (tick_count % LED_EVERY_TICKS == 0) {
-        led = !led;
-        digitalWrite(LED_BUILTIN, led);
+    // cuánto tardó este tick; se mide antes del reporte para que lo incluya
+    const uint32_t busy = micros() - start_us;
+    if (busy > max_busy_us) {
+        max_busy_us = busy;
     }
 
-    // cada report_ticks ticks se avisa al host (con 0 no se avisa).
-    // El reporte lleva el tick recién procesado.
-    if (tick_report_due(report_ticks, now, &next_report)) {
-        static Frame report;
-        TickReportData data;
-
-        data.tick = now;
-        data.deadline_misses = deadline_misses;
-        data.sporadic_ignored = 0; // todavía no hay tarea esporádica
-        data.ticks_lost = 0; // todavía no se detectan
-        data.events_dropped = usb_events_dropped();
-        data.bad_frames = usb_bad_frames();
-        data.max_busy_us = 0; // todavía no se mide
-        data.max_wake_latency_us = 0; // todavía no se mide
-
-        build_tick_report(&report, &data);
-        usb_send(&report);
-    }
+    report_if_due(now);
 }
 
 uint32_t node_tick_count(){

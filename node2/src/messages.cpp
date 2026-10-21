@@ -121,13 +121,38 @@ bool tick_report_due(uint16_t period, uint32_t tick, uint32_t *next_report){
     return true;
 }
 
-// EVENT: [tick (4)] [event_type (1)] [task_id (4)] [value (4)]
-void build_event(Frame *frame, const NodeEvent *event){
-    frame->type = (uint8_t)MessageType::Event;
-    frame->length = EVENT_SIZE;
+// EVENT: [cantidad (1)] y por cada evento [tipo (1)] [tick (4)] [id (2)] [arg (2)]
+size_t build_event_batch(Frame *frame, EventQueue *queue, size_t max_events){
+    if (!frame || !queue) {
+        return 0;
+    }
 
-    write_u32_le(&frame->payload[0], event->tick);
-    frame->payload[4] = (uint8_t)event->type;
-    write_u32_le(&frame->payload[5], event->task_id);
-    write_u32_le(&frame->payload[9], event->value);
+    // no caben más de EVENT_MAX_PER_FRAME en una trama
+    if (max_events > EVENT_MAX_PER_FRAME) {
+        max_events = EVENT_MAX_PER_FRAME;
+    }
+
+    size_t count = 0;
+    NodeEvent event;
+
+    while (count < max_events &&
+           queue->pop(event)) {
+        uint8_t *record = &frame->payload[1 + count * EVENT_RECORD_SIZE];
+
+        record[0] = (uint8_t)event.type;
+        write_u32_le(&record[1], event.tick);
+        write_u16_le(&record[5], event.task_id);
+        write_u16_le(&record[7], event.value);
+        count++;
+    }
+
+    // cola vacía o max_events en 0: no hay trama
+    if (count == 0) {
+        return 0;
+    }
+
+    frame->type = (uint8_t)MessageType::Event;
+    frame->length = (uint16_t)(1 + count * EVENT_RECORD_SIZE);
+    frame->payload[0] = (uint8_t)count;
+    return count;
 }
