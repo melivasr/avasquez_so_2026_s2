@@ -1,4 +1,3 @@
-
 #include <stdio.h>
 #include <inttypes.h> // Para uso correcto de enteros
 

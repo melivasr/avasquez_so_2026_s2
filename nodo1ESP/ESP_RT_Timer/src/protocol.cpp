@@ -4,7 +4,7 @@
 // ================================================================
 
 
-#include "protocol.h"
+#include "lib/protocol.h"
 
 #include <string.h>
 
