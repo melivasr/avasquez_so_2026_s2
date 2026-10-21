@@ -10,7 +10,7 @@ Documento para quienes desarrollan el host. El contrato entre host y nodo es **s
 | **[implementado, sin probar por cable]** | Existe en el código del nodo; sin evidencia por cable. |
 | **[propuesto — pendiente de acordar con el host]** | Solo diseño. No existe en el nodo. No programar contra esto hasta acordarlo. |
 
-Versión del documento: borrador 4 (`Start`, `Stop` y `Event` probados por cable; la ejecución se contrastó contra un modelo independiente).
+Versión del documento: borrador 8 (tarea esporádica probada por cable con el host y con el botón real; faltan el intervalo mínimo y las pulsaciones rápidas con el botón).
 
 ---
 
@@ -44,8 +44,8 @@ Ejemplo (ACK de un despliegue aceptado): `a5 5a 09 02 00 03 00 4b 01`
 | DeployTasks | 0x03 | host → nodo | probado por cable |
 | Start | 0x04 | host → nodo | probado por cable a nivel de ACK (con `N = 0`). Ver 9.1 |
 | Event | 0x05 | nodo → host | probado por cable (tipos 0x01 a 0x04); 0x07 implementado, sin provocar. Ver 9.5 |
-| TickReport | 0x06 | nodo → host | propuesto (sección 9) |
-| SporadicRelease | 0x07 | host → nodo | propuesto (sección 9) |
+| TickReport | 0x06 | nodo → host | probado por cable. Ver 9.6 |
+| SporadicRelease | 0x07 | host → nodo | probado por cable. Ver 9.7 |
 | Stop | 0x08 | host → nodo | probado por cable a nivel de ACK. Ver 9.2 |
 | Ack | 0x09 | nodo → host | probado por cable |
 | AddTask | 0x0A | host → nodo | propuesto (sección 9) |
@@ -113,12 +113,13 @@ Verificada por cable hasta el paso 4:
 
 Probado por cable a nivel de ACK (9.1 y 9.2):
 
-5. `Start` → `ACK(0x04, 0)`; el nodo ejecuta las tareas y empieza a enviar `Event` (probado por cable). `TickReport` todavía no se envía. Los primeros `Event` pueden llegar antes que el ACK de `Start`.
+5. `Start` → `ACK(0x04, 0)`; el nodo ejecuta las tareas y empieza a enviar `Event` (probado por cable) y, si `N` > 0, `TickReport` (probado por cable). Los primeros `Event` pueden llegar antes que el ACK de `Start`.
 7. `Stop` → `ACK(0x08, 0)`.
 
 Propuesto, no existe en el nodo:
 
-6. (Modo manual) `AddTask`; (opcional) `SporadicRelease`. `TickReport` se emitirá entre los pasos 5 y 7.
+6. `SporadicRelease` (probado por cable; ver 9.7) o el botón del nodo (probado, ver 9.7). `TickReport` se emite entre los pasos 5 y 7.
+6b. (Modo manual) `AddTask`: propuesto, no existe en el nodo.
 
 ## 9. Propuestas pendientes de acordar con el host
 
@@ -131,7 +132,7 @@ Probado por cable: `Start` válido → estado 0 (con `N = 0`); carga de 2 bytes 
 Carga de 3 bytes: `[algoritmo: 1 B][N: 2 B LE]`
 
 - `algoritmo`: 0 = RMS, 1 = EDF.
-- `N`: periodo del `TickReport` en ticks; 0 desactiva los reportes. Hoy el nodo acepta cualquier valor (0 a 65535) y lo guarda, pero **todavía no envía `TickReport`**.
+- `N`: periodo del `TickReport` en ticks; 0 desactiva los reportes. El nodo acepta cualquier valor (0 a 65535). Ver 9.6.
 - Prerrequisito: haber calibrado. El tick de ejecución es el `tick_us` de la última calibración exitosa (`Start` no lo lleva). La tabla puede estar vacía (un nodo sin tareas asignadas igual puede iniciarse).
 - Efecto: el **tick cero** es el instante en que el nodo termina de procesar la trama; luego envía `ACK(0x04, 0)`. Todos los contadores se reinician.
 - `ACK(0x04, 3)` si ya está en ejecución o no hubo calibración. `ACK(0x04, 1)` si la longitud de la carga ≠ 3, el algoritmo no es 0 ni 1, o el nodo no pudo iniciar la ejecución (tabla inválida o fallo del temporizador).
@@ -160,9 +161,9 @@ Carga: **una** línea de texto con el mismo formato que en `DeployTasks`, sin `\
 
 ### 9.5 Event (0x05), nodo → host — [RELEASE, SWITCH, COMPLETE y MISS probados por cable]
 
-Probado por cable (conjuntos de tareas A y B, RMS y EDF, tick de 10 ms, 300 ticks comparados, 49 de 49 comprobaciones): RELEASE, SWITCH, COMPLETE y MISS coinciden evento por evento con un modelo del calendarizador; marcas de tiempo no decrecientes; tramas bien formadas; sin TICK_LOST; ningún `Event` después del ACK de `Stop`. **No probado:** búfer lleno (descartes), ticks de 1 ms, corridas largas (cada corrida duró ~4 s) y el propio TICK_LOST (implementado, nunca provocado). **No implementados:** SPORADIC_IGNORED, TASK_ADDED y BAD_FRAME (se agregan con sus funciones).
+Probado por cable (conjuntos de tareas A y B, RMS y EDF, tick de 10 ms, 300 ticks comparados, 49 de 49 comprobaciones): RELEASE, SWITCH, COMPLETE y MISS coinciden evento por evento con un modelo del calendarizador; marcas de tiempo no decrecientes; tramas bien formadas; sin TICK_LOST; ningún `Event` después del ACK de `Stop`. **No probado:** búfer lleno (descartes), ticks de 1 ms, corridas largas (cada corrida duró ~4 s) y el propio TICK_LOST (implementado, nunca provocado). SPORADIC_IGNORED con motivo 0 (vía `SporadicRelease`) está probado por cable; el motivo 1 (sin tarea esporádica, solo ocurre con el botón) no se ha probado. **No implementados:** TASK_ADDED y BAD_FRAME (se agregan con sus funciones).
 
-Comportamiento del búfer: 256 registros en RAM, transmitidos en segundo plano por una tarea aparte; el calendarizador solo encola. Si el búfer se llena se **descarta el evento nuevo** y se cuenta; el host no recibe aviso hasta que exista `TickReport` (`eventos_descartados`). El `Start` vacía el búfer. Orden: las marcas `tick` son no decrecientes; COMPLETE se estampa con el tick de fin del tramo. Punto abierto para acordar con el host: al hacer `Stop` no se emite un evento de fin de ejecución; si el host lo necesita para cerrar el Gantt, se propone agregarlo.
+Comportamiento del búfer: 256 registros en RAM, transmitidos en segundo plano por una tarea aparte; el calendarizador solo encola. Si el búfer se llena se **descarta el evento nuevo** y se cuenta; el host se entera por el contador `eventos_descartados` del `TickReport` (9.6); con `N` = 0 no hay aviso. El `Start` vacía el búfer. Orden: las marcas `tick` son no decrecientes; COMPLETE se estampa con el tick de fin del tramo. Punto abierto para acordar con el host: al hacer `Stop` no se emite un evento de fin de ejecución; si el host lo necesita para cerrar el Gantt, se propone agregarlo.
 
 Carga: `[cantidad: 1 B][registro × cantidad]`, hasta 56 registros por trama. Registro de 9 bytes:
 
@@ -178,7 +179,7 @@ Carga: `[cantidad: 1 B][registro × cantidad]`, hasta 56 registros por trama. Re
 | 0x02 | SWITCH | tarea que corre desde este tick (0 = ocioso) | tarea anterior (0 = ocioso) |
 | 0x03 | COMPLETE | tarea | n.º de trabajo |
 | 0x04 | MISS (trabajo abortado) | tarea | n.º de trabajo |
-| 0x05 | SPORADIC_IGNORED (intervalo mínimo) | tarea esporádica (0 si no hay) | 0 |
+| 0x05 | SPORADIC_IGNORED (pulsación ignorada) | tarea esporádica (0 si no hay) | motivo: 0 = no pasó el intervalo mínimo, 1 = no hay tarea esporádica |
 | 0x06 | TASK_ADDED | tarea | ranura asignada |
 | 0x07 | TICK_LOST | 0 | ticks perdidos |
 | 0x08 | BAD_FRAME (máx. una vez por tick) | 0 | total acumulado |
@@ -187,20 +188,54 @@ Convención: un SWITCH en el tick *k* significa que el tramo [*k*, *k*+1) perten
 
 Límite que esto introduce: **`id` ≤ 65535** (el nodo rechaza IDs mayores).
 
-### 9.6 TickReport (0x06), nodo → host
+### 9.6 TickReport (0x06), nodo → host — [probado por cable]
 
-Se envía cada `N` ticks. Carga de 18 bytes, contadores acumulados desde `Start`:
+Probado por cable (tick de 10 ms): periodo `N` = 20, 10, 1 y 0 (sin huecos entre reportes; con `N` = 1, 205 reportes consecutivos en ~2 s); contadores no decrecientes; `plazos_perdidos` igual a los MISS recibidos hasta cada tick; `tramas_malas` exacto (5 tramas con CRC malo + 1 truncada = 6) sin alterar la ejecución; ningún reporte después del ACK de `Stop`. **No probado:** corridas largas, ticks de 1 ms, `ticks_perdidos` y `eventos_descartados` distintos de 0 (siempre fueron 0), `esporadicas_ignoradas` distinto de 0 en esas pruebas (se probó aparte, ver 9.7).
+
+Medición del margen de calibración (una sola corrida de ~3 s, conjunto B con EDF, tick de 10 ms, `ut_por_tick` = 70): `max_ocupado_us` = 7907 µs (79 % del tick) y `max_latencia_us` = 20 µs. Es una medición puntual, no una cota garantizada.
+
+> **Cambio respecto a la propuesta anterior (18 bytes):** se agregó `max_latencia_us` al final. Un parser que lea solo los primeros 18 bytes sigue funcionando; se recomienda validar por longitud (22 bytes).
+
+Se envía cada `N` ticks (el `N` de `Start`; 0 = no se envía). Carga de 22 bytes, little endian:
 
 ```
-[tick: 4 B LE][plazos_perdidos: 2 B][esporadicas_ignoradas: 2 B]
-[ticks_perdidos: 2 B][eventos_descartados: 2 B][tramas_malas: 2 B][max_ocupado_us: 4 B LE]
+[tick: 4 B][plazos_perdidos: 2 B][esporadicas_ignoradas: 2 B][ticks_perdidos: 2 B]
+[eventos_descartados: 2 B][tramas_malas: 2 B][max_ocupado_us: 4 B][max_latencia_us: 4 B]
 ```
 
-`max_ocupado_us` es el mayor tiempo de CPU usado dentro de un tick (sirve para validar el margen de calibración).
+- **`tick`:** último tick procesado. El primer reporte sale en el tick `N`, luego en `2N`, `3N`... Si se pierden ticks, el reporte siguiente sale en el siguiente múltiplo de `N` (no hay ráfagas).
+- **Contadores:** acumulados desde `Start`. Los de 16 bits saturan en 65535.
+- **`plazos_perdidos`:** coincide con la cantidad de eventos MISS hasta ese `tick`.
+- **`esporadicas_ignoradas`:** pulsaciones de la esporádica ignoradas (intervalo mínimo no cumplido o sin tarea esporádica); coincide con los eventos SPORADIC_IGNORED hasta ese `tick`, salvo que por tick solo se emiten los primeros 8 eventos de ignoradas (el contador sí cuenta todas). **[probado por cable con 1 ignorada, que coincidió con el evento]**
+- **`ticks_perdidos`:** ticks que el nodo no alcanzó a procesar.
+- **`eventos_descartados`:** eventos perdidos por búfer lleno (9.5).
+- **`tramas_malas`:** tramas recibidas del host y descartadas por CRC o longitud inválidos, por exceder el tamaño máximo o por quedar incompletas (timeout entre bytes). El ruido antes de una marca de inicio no cuenta.
+- **`max_ocupado_us`:** mayor tiempo de proceso dentro de un tick (incluye ejecutar las UT del tramo). Dividido entre la duración del tick indica la ocupación; la calibración deja un margen del 80 %, por lo que se espera un valor cercano o por debajo de ese porcentaje.
+- **`max_latencia_us`:** mayor retraso entre la alarma del temporizador y el inicio del proceso del tick.
 
-### 9.7 SporadicRelease (0x07), host → nodo
+Reglas de uso para el host:
 
-Carga vacía. Equivale a pulsar el botón del nodo (pasa por la misma verificación de intervalo mínimo). `ACK(0x07, 0)` registrado; `ACK(0x07, 1)` el nodo no tiene tarea esporádica; `ACK(0x07, 3)` no está en ejecución.
+- `Event` y `TickReport` pueden intercalarse: los eventos de un tick posterior pueden llegar antes que el reporte de un tick anterior. Usar el campo `tick`, no el orden de llegada.
+- Se transmite en segundo plano con prioridad baja. Si un reporte no alcanza a salir antes de que se prepare el siguiente, se reemplaza (solo importa el más reciente); con `N` = 1 no se observaron reemplazos en la prueba (ver arriba).
+- Tras el ACK de `Stop` no llega ningún `TickReport` más.
+- Para declarar un nodo caído, el host puede contar reportes consecutivos ausentes (cada reporte indica que el calendarizador sigue vivo).
+
+### 9.7 Tarea esporádica, botón y SporadicRelease (0x07) — [probado por cable]
+
+Probado por cable (tick de 10 ms, EDF y RMS, tarea esporádica con C = 2, T = D = 50 ticks junto a una periódica): la esporádica no se libera sola; tres `SporadicRelease` producen 2 liberaciones y 1 ignorada (motivo 0), separadas al menos `T`; números de trabajo consecutivos; cada liberación tiene su COMPLETE; latencia de respuesta de 2 a 3 ticks (medida liberación → fin, con la periódica de mayor prioridad); sin plazos perdidos; `ACK(0x07, 3)` sin ejecución, `ACK(0x07, 1)` sin esporádica o con carga no vacía. Con el botón real (GPIO 27): 6 pulsaciones lentas produjeron exactamente 6 liberaciones, ninguna ignorada y ningún rebote contado (incluido el rebote al soltar); latencias de 2 a 3 ticks. **No probado por cable:** pulsaciones rápidas con el botón (intervalo mínimo con el botón real), pulsaciones separadas menos de 50 ms, el motivo 1 de SPORADIC_IGNORED, dos pulsaciones en un mismo tick y `D` > `T` con la esporádica (solo en pruebas aisladas).
+
+**Tarea esporádica.** Se declara en `DeployTasks` con tipo `S` (máximo una por nodo). Nunca se libera sola. `T` es el intervalo mínimo entre liberaciones y `D` su plazo; para la admisión el host la trata como periódica con periodo `T`.
+
+**Fuentes de pulsación.** Dos, con el mismo tratamiento:
+
+- El botón del nodo en **GPIO 27** (a GND, con pull-up interno). La rutina de interrupción solo registra la pulsación. Antirrebote: se acepta un flanco de bajada si pasaron al menos **50 ms** desde el flanco anterior (de cualquier tipo), lo que filtra el rebote al soltar. Dos pulsaciones separadas menos de 50 ms cuentan como una.
+- El mensaje `SporadicRelease` (carga vacía, host → nodo).
+
+**Procesamiento.** Las pulsaciones se procesan al inicio del siguiente tick: la liberación queda estampada con ese tick (hasta un tick de retardo respecto a la pulsación real). La primera pulsación siempre libera; las siguientes liberan solo si pasaron al menos `T` ticks desde la **última liberación aceptada**. Si no, se emite SPORADIC_IGNORED (motivo 0) y se cuenta. Si hay más de una pulsación en un mismo tick, solo la primera puede liberar. Sin tarea esporádica en la tabla, el botón genera SPORADIC_IGNORED con `id` = 0 y motivo 1. Las pulsaciones anteriores al `Start` se descartan. Si la liberación llega con el trabajo anterior aún activo (`D` > `T`), se aborta como plazo perdido, igual que en una periódica.
+
+**Latencia de respuesta.** Se obtiene en el host de los eventos: RELEASE (liberación) y COMPLETE (fin) de la tarea esporádica.
+
+**SporadicRelease.** `ACK(0x07, 0)`: la pulsación quedó **registrada** (si libera o se ignora lo informan los eventos). `ACK(0x07, 1)`: carga no vacía, o el nodo no tiene tarea esporádica. `ACK(0x07, 3)`: el nodo no está en ejecución.
 
 ### 9.8 Mapeo de LEDs — [implementado; probado con una demostración, no con el protocolo]
 
@@ -222,6 +257,10 @@ Ranura = posición de la tarea en el despliegue (1 a 8); `AddTask` usa la siguie
 ## 11. Registro de cambios
 
 - Borrador 0: documento inicial. Solo la sección 9 es nueva respecto al código existente; el resto documenta lo ya verificado.
+- Borrador 8: sin cambios de formato. Tarea esporádica probada por cable (`test_sporadic.py`: 43 de 43 con `SporadicRelease`; 57 de 57 con el botón real, 6 pulsaciones lentas).
+- Borrador 7: tarea esporádica implementada (botón GPIO 27 con antirrebote de 50 ms, intervalo mínimo, `SporadicRelease`, evento SPORADIC_IGNORED con motivo en `arg`, contador `esporadicas_ignoradas`). Cambio de formato: el campo `arg` de SPORADIC_IGNORED pasa de "siempre 0" a un código de motivo. Sin probar por cable.
+- Borrador 6: sin cambios de formato. `TickReport` probado por cable (`test_tickreport.py`).
+- Borrador 5: `TickReport` implementado (22 bytes: se agregó `max_latencia_us` al final del formato propuesto); `Start` reinicia el contador de tramas malas. Sin probar por cable.
 - Borrador 4: sin cambios de formato. `Event` (RELEASE, SWITCH, COMPLETE, MISS), `Stop` con entrega previa de eventos y envío atómico de tramas probados por cable (`test_events.py`, 49 de 49; regresión de `test_start_stop.py`, 18 de 18).
 - Borrador 3: `Event` implementado (RELEASE, SWITCH, COMPLETE, MISS, TICK_LOST), búfer circular de 256 registros con transmisión en segundo plano; `Stop` entrega los eventos pendientes antes de su ACK; los `Event` pueden llegar antes que el ACK de `Start`; las tramas salientes (ACK, `CalibrateResp`, `Event`) se envían de forma atómica. Sin cambios en los mensajes ya existentes. Sin probar por cable.
 - Borrador 2: `Start`/`Stop`, estado 3, rechazo de `id` > 65535 y de segunda esporádica, y calibración con el nodo en ejecución probados por cable (script de prueba, 18 de 18 comprobaciones de ACK en EDF y en RMS). Sin cambios de formato.

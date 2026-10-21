@@ -36,13 +36,19 @@ uint8_t node_calibrate(uint32_t tick_us, uint32_t *ut_per_tick_out);
 
 // Inicia la ejecución con las tareas dadas (se copian). Tick cero = ahora.
 // NODE_BAD_STATE si ya está en ejecución o no hay calibración.
-// report_n (periodo de TickReport) se guarda; aún no se usa.
+// report_n: periodo del TickReport en ticks (0 = desactivado).
 uint8_t node_start(Algorithm algorithm, uint16_t report_n,
                    const Task *tasks, size_t count);
 
 // Detiene la ejecución y transmite todos los eventos pendientes antes de
 // volver (el ACK de Stop sale después). NODE_BAD_STATE si no estaba en ejecución.
 uint8_t node_stop(void);
+
+// Registra una pulsación de la tarea esporádica pedida por el host (equivale
+// al botón). NODE_OK = registrada (el calendarizador decide en el siguiente
+// tick si libera o ignora; se informa por Event); NODE_REJECTED = el nodo no
+// tiene tarea esporádica; NODE_BAD_STATE = no está en ejecución.
+uint8_t node_sporadic_release(void);
 
 bool node_is_running(void);
 NodeStats node_stats(void);

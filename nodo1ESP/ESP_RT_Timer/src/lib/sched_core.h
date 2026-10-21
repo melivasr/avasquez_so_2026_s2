@@ -27,8 +27,16 @@ enum class SchedEventType : uint8_t {
     Release  = 0x01, // id = tarea, arg = n.º de trabajo
     Switch   = 0x02, // id = tarea que corre desde este tick (0 = ocioso), arg = anterior
     Complete = 0x03, // id = tarea, arg = n.º de trabajo (tick = fin del último tramo)
-    Miss     = 0x04  // id = tarea, arg = n.º de trabajo abortado
+    Miss     = 0x04, // id = tarea, arg = n.º de trabajo abortado
+    SporadicIgnored = 0x05 // id = tarea esporádica (0 si no hay), arg = motivo SCHED_IGNORED_*
 };
+
+// Motivos de SporadicIgnored (campo arg).
+constexpr uint16_t SCHED_IGNORED_MIN_INTERVAL = 0; // no pasó el intervalo mínimo
+constexpr uint16_t SCHED_IGNORED_NO_TASK = 1;      // no hay tarea esporádica
+
+// Pulsaciones que generan evento individual por tick; el resto solo se cuenta.
+constexpr uint32_t SCHED_MAX_PRESS_EVENTS_PER_TICK = 8;
 
 struct SchedEvent {
     SchedEventType type;
@@ -57,6 +65,8 @@ struct Scheduler {
     uint32_t next_tick;    // próximo límite de tick a procesar (empieza en 0)
     uint16_t running_id;   // 0 = ocioso
     uint32_t miss_count;
+    uint32_t pending_presses;   // pulsaciones registradas, aún sin procesar
+    uint32_t sporadic_ignored;  // pulsaciones ignoradas desde sched_init
     SchedEventSink sink;   // puede ser nullptr
     SchedWorkFn work;      // puede ser nullptr
     void *ctx;
@@ -72,7 +82,12 @@ bool sched_init(Scheduler *s, Algorithm algorithm, uint32_t ut_per_tick,
 // tipo inválido o segunda esporádica. slot_out (opcional) recibe 1..8.
 bool sched_add_task(Scheduler *s, const Task *task, uint16_t *slot_out);
 
-// Procesa un límite de tick: plazos, liberaciones, selección y un tramo.
+// Registra 'presses' pulsaciones (botón o SporadicRelease) para procesarlas en
+// el próximo sched_tick. Se llama desde el mismo contexto que sched_tick.
+void sched_sporadic_press(Scheduler *s, uint32_t presses);
+
+// Procesa un límite de tick: plazos, liberaciones, pulsaciones de la
+// esporádica, selección y un tramo.
 void sched_tick(Scheduler *s);
 
 #endif

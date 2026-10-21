@@ -5,6 +5,7 @@
 // segundo plano. El calendarizador solo encola (sección crítica breve); nunca
 // escribe en la UART.
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Crea la tarea de transmisión (núcleo 0, prioridad baja). false si falla.
@@ -17,7 +18,12 @@ void event_tx_reset(void);
 // Encola un evento. Seguro desde cualquier tarea (no desde ISR).
 void event_tx_push(uint8_t type, uint32_t tick, uint16_t id, uint16_t arg);
 
-// Avisa a la tarea de transmisión que hay eventos pendientes.
+// Deja listo un TickReport (carga ya codificada, máx. 32 B). Si había otro
+// sin enviar, se reemplaza (solo importa el más reciente). Se transmite
+// después de los eventos que ya estén en el búfer.
+void event_tx_post_report(const uint8_t *payload, size_t length);
+
+// Avisa a la tarea de transmisión que hay eventos o un reporte pendientes.
 void event_tx_kick(void);
 
 // Bloquea hasta que todo lo encolado se haya entregado al driver UART.

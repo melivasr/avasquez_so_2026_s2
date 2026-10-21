@@ -4,9 +4,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <vector>
 
-#include "sched_core.h"
+#include "lib/sched_core.h"
 
 static int g_checks = 0;
 static int g_failed = 0;
@@ -329,6 +330,155 @@ static void test_add_while_running()
     CHECK(seen);
 }
 
+
+static std::vector<SchedEvent> of_id(const std::vector<SchedEvent> &v, SchedEventType type, uint16_t id)
+{
+    std::vector<SchedEvent> out;
+    for (const SchedEvent &e : v) {
+        if (e.type == type && e.id == id) {
+            out.push_back(e);
+        }
+    }
+    return out;
+}
+
+static void test_sporadic_release_and_min_interval()
+{
+    printf("esporádica: liberación e intervalo mínimo\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::EDF, 10, sink, work, &r));
+    add(&s, mk(3, 'S', 10, 5, 5, 3));       // C=1, T=5, D=5
+
+    run(&s, 3);                              // ticks 0..2 sin pulsaciones
+    CHECK(only(r, SchedEventType::Release).empty());
+
+    sched_sporadic_press(&s, 1); run(&s, 1); // tick 3: libera
+    run(&s, 1);                              // tick 4
+    sched_sporadic_press(&s, 1); run(&s, 1); // tick 5: 5-3 < 5 -> ignora
+    run(&s, 1);                              // tick 6
+    sched_sporadic_press(&s, 1); run(&s, 1); // tick 7: ignora
+    sched_sporadic_press(&s, 1); run(&s, 1); // tick 8: 8-3 = 5 -> libera
+
+    std::vector<SchedEvent> rel = of_id(r.events, SchedEventType::Release, 3);
+    CHECK(rel.size() == 2);
+    if (rel.size() == 2) {
+        CHECK(rel[0].tick == 3 && rel[0].arg == 1);
+        CHECK(rel[1].tick == 8 && rel[1].arg == 2);
+    }
+
+    std::vector<SchedEvent> ign = only(r, SchedEventType::SporadicIgnored);
+    CHECK(ign.size() == 2);
+    if (ign.size() == 2) {
+        CHECK(ign[0].tick == 5 && ign[0].id == 3 && ign[0].arg == SCHED_IGNORED_MIN_INTERVAL);
+        CHECK(ign[1].tick == 7 && ign[1].id == 3 && ign[1].arg == SCHED_IGNORED_MIN_INTERVAL);
+    }
+    CHECK(s.sporadic_ignored == 2);
+
+    std::vector<SchedEvent> done = of_id(r.events, SchedEventType::Complete, 3);
+    CHECK(done.size() == 2);
+    if (done.size() == 2) {
+        CHECK(done[0].tick == 4);            // liberada en 3, un tramo
+        CHECK(done[1].tick == 9);
+    }
+    CHECK(s.miss_count == 0);
+}
+
+static void test_sporadic_first_release_at_tick_zero_and_same_tick()
+{
+    printf("esporádica: dos pulsaciones en el mismo tick\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::RMS, 10, sink, work, &r));
+    add(&s, mk(7, 'S', 10, 5, 5, 1));
+    sched_sporadic_press(&s, 2);
+    run(&s, 1);                              // tick 0
+    CHECK(of_id(r.events, SchedEventType::Release, 7).size() == 1);
+    CHECK(of_id(r.events, SchedEventType::Release, 7)[0].tick == 0);
+    std::vector<SchedEvent> ign = only(r, SchedEventType::SporadicIgnored);
+    CHECK(ign.size() == 1);
+    CHECK(s.sporadic_ignored == 1);
+}
+
+static void test_press_without_sporadic_task()
+{
+    printf("pulsaciones sin tarea esporádica\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::EDF, 10, sink, work, &r));
+    add(&s, mk(1, 'P', 10, 10, 10, 1));
+    sched_sporadic_press(&s, 3);
+    run(&s, 1);
+    std::vector<SchedEvent> ign = only(r, SchedEventType::SporadicIgnored);
+    CHECK(ign.size() == 3);
+    for (const SchedEvent &e : ign) {
+        CHECK(e.id == 0 && e.arg == SCHED_IGNORED_NO_TASK && e.tick == 0);
+    }
+    CHECK(s.sporadic_ignored == 3);
+    CHECK(only(r, SchedEventType::Release).size() == 1);   // solo la periódica
+    CHECK(s.pending_presses == 0);
+}
+
+static void test_press_event_cap_and_saturation()
+{
+    printf("tope de eventos por tick y saturación\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::EDF, 10, sink, work, &r));
+    sched_sporadic_press(&s, 20);
+    run(&s, 1);
+    CHECK(only(r, SchedEventType::SporadicIgnored).size() == SCHED_MAX_PRESS_EVENTS_PER_TICK);
+    CHECK(s.sporadic_ignored == 20);                          // todas contadas
+
+    s.pending_presses = UINT32_MAX - 1;
+    sched_sporadic_press(&s, 5);
+    CHECK(s.pending_presses == UINT32_MAX);
+    sched_sporadic_press(nullptr, 1);                         // no rompe
+}
+
+static void test_sporadic_with_periodic()
+{
+    printf("esporádica junto a una periódica (RMS)\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::RMS, 10, sink, work, &r));
+    add(&s, mk(1, 'P', 10, 4, 4, 1));        // C=1, T=4
+    add(&s, mk(2, 'S', 20, 10, 10, 1));      // C=2, T=10
+    run(&s, 1);                              // tick 0
+    sched_sporadic_press(&s, 1);
+    run(&s, 5);                              // ticks 1..5
+
+    std::vector<SchedEvent> rel = of_id(r.events, SchedEventType::Release, 2);
+    CHECK(rel.size() == 1 && rel[0].tick == 1);
+    std::vector<SchedEvent> done = of_id(r.events, SchedEventType::Complete, 2);
+    CHECK(done.size() == 1);
+    if (!done.empty()) {
+        CHECK(done[0].tick == 3);            // tramos en 1 y 2
+    }
+    CHECK(s.miss_count == 0);
+}
+
+static void test_sporadic_overlap_aborts()
+{
+    printf("esporádica con trabajo aún activo (D > T)\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::EDF, 10, sink, work, &r));
+    add(&s, mk(1, 'S', 100, 2, 20, 1));      // C=10 > T=2, D=20
+    sched_sporadic_press(&s, 1);
+    run(&s, 1);                              // tick 0: libera, ejecuta 1 tramo
+    run(&s, 1);                              // tick 1
+    sched_sporadic_press(&s, 1);
+    run(&s, 1);                              // tick 2: 2-0 >= 2 -> permitido, aborta el activo
+    std::vector<SchedEvent> miss = only(r, SchedEventType::Miss);
+    CHECK(miss.size() == 1);
+    if (!miss.empty()) {
+        CHECK(miss[0].tick == 2 && miss[0].id == 1 && miss[0].arg == 1);
+    }
+    std::vector<SchedEvent> rel = of_id(r.events, SchedEventType::Release, 1);
+    CHECK(rel.size() == 2 && rel[1].tick == 2 && rel[1].arg == 2);
+}
+
 int main()
 {
     test_cost_and_slices();
@@ -340,6 +490,12 @@ int main()
     test_deadline_longer_than_period();
     test_sporadic_not_auto_released();
     test_add_while_running();
+    test_sporadic_release_and_min_interval();
+    test_sporadic_first_release_at_tick_zero_and_same_tick();
+    test_press_without_sporadic_task();
+    test_press_event_cap_and_saturation();
+    test_sporadic_with_periodic();
+    test_sporadic_overlap_aborts();
 
     printf("\n%d comprobaciones, %d fallos\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;

@@ -33,6 +33,19 @@ static size_t deployed_count = 0;
 static SemaphoreHandle_t tx_mutex = nullptr;
 static uint8_t tx_frame[FRAME_MAX_SIZE];
 
+// Tramas corruptas descartadas (se informa en TickReport).
+static volatile uint32_t bad_frames = 0;
+
+uint32_t serial_bad_frames(void)
+{
+    return bad_frames;
+}
+
+void serial_bad_frames_reset(void)
+{
+    bad_frames = 0;
+}
+
 bool serial_send_frame(MessageType type, const uint8_t *payload, uint16_t length)
 {
     if (tx_mutex == nullptr) {
@@ -203,11 +216,22 @@ static void process_stop(const Frame &frame)
     send_ack(MessageType::Stop, node_stop());
 }
 
+static void process_sporadic_release(const Frame &frame)
+{
+    // Carga vacía. El ACK 0 solo indica que la pulsación quedó registrada.
+    if (frame.length != 0) {
+        send_ack(MessageType::SporadicRelease, NODE_REJECTED);
+        return;
+    }
+
+    send_ack(MessageType::SporadicRelease, node_sporadic_release());
+}
+
 static void process_received_frame(const uint8_t *data, size_t length)
 {
     if (!decode_frame(data, length, &decoded_frame)) {
-        // Trama corrupta: se descarta. El reporte de errores
-        // se añadirá posteriormente mediante la cola de eventos.
+        // Trama corrupta: se descarta y se cuenta (TickReport).
+        bad_frames = bad_frames + 1;
         return;
     }
 
@@ -223,6 +247,8 @@ static void process_received_frame(const uint8_t *data, size_t length)
         process_start(decoded_frame);
     } else if (decoded_frame.type == MessageType::Stop) {
         process_stop(decoded_frame);
+    } else if (decoded_frame.type == MessageType::SporadicRelease) {
+        process_sporadic_release(decoded_frame);
     } else {
         // Tipo válido a nivel de trama, pero aún no implementado.
         send_ack(decoded_frame.type, 2);
@@ -282,6 +308,9 @@ void serial_receiver_run(void)
 
         if (received != 1) {
             // Timeout con trama incompleta: descartarla y resincronizar.
+            if (used > 0) {
+                bad_frames = bad_frames + 1;
+            }
             used = 0;
             expected = 0;
             continue;
@@ -301,6 +330,7 @@ void serial_receiver_run(void)
         }
 
         if (used >= sizeof(rx_frame)) {
+            bad_frames = bad_frames + 1;
             used = 0;
             expected = 0;
             continue;
@@ -314,6 +344,7 @@ void serial_receiver_run(void)
                 (static_cast<uint16_t>(rx_frame[4]) << 8);
 
             if (payload_length > FRAME_MAX_PAYLOAD) {
+                bad_frames = bad_frames + 1;
                 used = 0;
                 expected = 0;
                 continue;

@@ -1,5 +1,7 @@
 #include "lib/event_tx.h"
 
+#include <string.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -17,6 +19,10 @@ static portMUX_TYPE g_lock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t g_tx_task = nullptr;
 static SemaphoreHandle_t g_flush_done = nullptr;
 static volatile bool g_flush_requested = false;
+
+static constexpr size_t REPORT_MAX = 32;
+static uint8_t g_report[REPORT_MAX];
+static size_t g_report_len = 0; // 0 = no hay reporte pendiente
 
 static void tx_task(void *arg)
 {
@@ -41,6 +47,23 @@ static void tx_task(void *arg)
             // Si la escritura falla, ese lote se pierde (sin reintento).
             serial_send_frame(MessageType::Event, payload,
                               static_cast<uint16_t>(length));
+        }
+
+        // Reporte pendiente (si lo hay): sale después de los eventos.
+        uint8_t report[REPORT_MAX];
+        size_t report_len = 0;
+
+        portENTER_CRITICAL(&g_lock);
+        report_len = g_report_len;
+        if (report_len > 0) {
+            memcpy(report, g_report, report_len);
+            g_report_len = 0;
+        }
+        portEXIT_CRITICAL(&g_lock);
+
+        if (report_len > 0) {
+            serial_send_frame(MessageType::TickReport, report,
+                              static_cast<uint16_t>(report_len));
         }
 
         if (g_flush_requested) {
@@ -77,6 +100,19 @@ void event_tx_reset(void)
 {
     portENTER_CRITICAL(&g_lock);
     event_ring_init(&g_ring);
+    g_report_len = 0;
+    portEXIT_CRITICAL(&g_lock);
+}
+
+void event_tx_post_report(const uint8_t *payload, size_t length)
+{
+    if (payload == nullptr || length == 0 || length > REPORT_MAX) {
+        return;
+    }
+
+    portENTER_CRITICAL(&g_lock);
+    memcpy(g_report, payload, length);
+    g_report_len = length;
     portEXIT_CRITICAL(&g_lock);
 }
 
@@ -96,7 +132,7 @@ void event_tx_kick(void)
     }
 
     portENTER_CRITICAL(&g_lock);
-    const size_t pending = event_ring_count(&g_ring);
+    const size_t pending = event_ring_count(&g_ring) + g_report_len;
     portEXIT_CRITICAL(&g_lock);
 
     if (pending > 0) {

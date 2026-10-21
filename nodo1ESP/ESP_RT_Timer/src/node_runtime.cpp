@@ -16,6 +16,8 @@
 #include "lib/calibration.h"
 #include "lib/event_tx.h"
 #include "lib/event_queue.h"
+#include "lib/serial_receiver.h"
+#include "lib/tick_report.h"
 
 // ut.h no tiene extern "C" y no se puede modificar.
 extern "C" void unidad_trabajo(void);
@@ -28,6 +30,12 @@ extern "C" void unidad_trabajo(void);
 static constexpr gpio_num_t LED_SLOT_PINS[4] = {
     GPIO_NUM_18, GPIO_NUM_19, GPIO_NUM_21, GPIO_NUM_22};
 static constexpr gpio_num_t LED_MISS_PIN = GPIO_NUM_23;
+
+// Botón de la tarea esporádica: a GND, con pull-up interno.
+static constexpr gpio_num_t BUTTON_PIN = GPIO_NUM_27;
+// Antirrebote: una pulsación se acepta si el flanco de bajada llega al menos
+// este tiempo después del flanco anterior (de cualquier tipo).
+static constexpr uint32_t BUTTON_DEBOUNCE_US = 50000;
 
 static constexpr UBaseType_t SCHED_TASK_PRIORITY = 10;
 static constexpr uint32_t SCHED_TASK_STACK_BYTES = 4096;
@@ -72,10 +80,20 @@ static bool g_calibrated = false;
 static uint32_t g_sn = 0;
 static uint32_t g_tick_us = 0;
 static uint16_t g_report_n = 0;
+static uint32_t g_next_report = 0;
 
 // Escritos por la ISR (el +1 evita ++ sobre volatile).
 static volatile uint32_t g_isr_ticks = 0;
 static volatile uint32_t g_isr_time_us = 0; // 32 bits bajos de esp_timer
+
+// Pulsaciones de la esporádica. Cada contador tiene UN solo escritor:
+// el botón (ISR) y el host (tarea UART). La tarea calendarizadora los lee.
+static volatile uint32_t g_button_presses = 0;
+static volatile uint32_t g_host_presses = 0;
+static volatile uint32_t g_last_edge_us = 0;
+static uint32_t g_seen_button = 0; // solo la tarea calendarizadora
+static uint32_t g_seen_host = 0;
+static volatile bool g_has_sporadic = false;
 
 // ================================================================
 // LEDs
@@ -111,6 +129,55 @@ static void leds_fail()
 {
     show_slot(0xF);
     gpio_set_level(LED_MISS_PIN, 1);
+}
+
+// ISR del botón: solo registra la pulsación (antirrebote por tiempo entre
+// flancos). El calendarizador hace el resto.
+static void IRAM_ATTR on_button_edge(void *arg)
+{
+    (void)arg;
+
+    const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+    const uint32_t gap = now - g_last_edge_us;
+    g_last_edge_us = now;
+
+    if (gpio_get_level(BUTTON_PIN) == 0 && gap >= BUTTON_DEBOUNCE_US) {
+        g_button_presses = g_button_presses + 1;
+    }
+}
+
+static bool button_init()
+{
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << BUTTON_PIN;
+    cfg.mode = GPIO_MODE_INPUT;
+    cfg.pull_up_en = GPIO_PULLUP_ENABLE;
+    cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    cfg.intr_type = GPIO_INTR_ANYEDGE;
+    if (gpio_config(&cfg) != ESP_OK) {
+        return false;
+    }
+
+    const esp_err_t err = gpio_install_isr_service(0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) { // ya instalado: válido
+        return false;
+    }
+
+    return gpio_isr_handler_add(BUTTON_PIN, on_button_edge, nullptr) == ESP_OK;
+}
+
+// Entrega al núcleo las pulsaciones nuevas (botón + host).
+static void feed_presses()
+{
+    const uint32_t button = g_button_presses;
+    const uint32_t host = g_host_presses;
+    const uint32_t fresh = (button - g_seen_button) + (host - g_seen_host);
+    g_seen_button = button;
+    g_seen_host = host;
+
+    if (fresh > 0) {
+        sched_sporadic_press(&g_sched, fresh);
+    }
 }
 
 // Ranura 1..8 según la posición en la tabla; 0 = ocioso.
@@ -248,8 +315,20 @@ static uint8_t do_start()
         return NODE_REJECTED;
     }
 
+    // Pulsaciones anteriores al Start no cuentan.
+    g_seen_button = g_button_presses;
+    g_seen_host = g_host_presses;
+    g_has_sporadic = false;
+    for (size_t i = 0; i < g_cmd.task_count; ++i) {
+        if (g_cmd.tasks[i].type == TaskType::Sporadic) {
+            g_has_sporadic = true;
+        }
+    }
+
     g_stats = NodeStats{};
     g_report_n = g_cmd.report_n;
+    g_next_report = g_cmd.report_n;
+    serial_bad_frames_reset();
     g_isr_ticks = 0;
     event_tx_reset();
     gpio_set_level(LED_MISS_PIN, 0);
@@ -292,6 +371,7 @@ static void handle_command()
             // Se libera a la tarea UART (envía el ACK) y se procesa el
             // tick cero de inmediato; las alarmas marcan los siguientes.
             xSemaphoreGive(g_done);
+            feed_presses();
             sched_tick(&g_sched);
             event_tx_kick();
             return;
@@ -308,6 +388,28 @@ static void handle_command()
     }
 
     xSemaphoreGive(g_done);
+}
+
+// Si toca, deja listo el TickReport del tick recién procesado.
+static void post_report_if_due(uint32_t tick)
+{
+    if (!tick_report_due(g_report_n, tick, &g_next_report)) {
+        return;
+    }
+
+    TickReportData data = {};
+    data.tick = tick;
+    data.deadline_misses = g_sched.miss_count;
+    data.sporadic_ignored = g_sched.sporadic_ignored;
+    data.ticks_lost = g_stats.ticks_lost;
+    data.events_dropped = event_tx_dropped();
+    data.bad_frames = serial_bad_frames();
+    data.max_busy_us = g_stats.max_busy_us;
+    data.max_wake_latency_us = g_stats.max_wake_latency_us;
+
+    uint8_t payload[TICK_REPORT_SIZE];
+    const size_t length = tick_report_encode(data, payload, sizeof(payload));
+    event_tx_post_report(payload, length);
 }
 
 static void handle_tick()
@@ -335,14 +437,18 @@ static void handle_tick()
                       static_cast<uint16_t>(lost > 0xFFFFU ? 0xFFFFU : lost));
     }
 
+    const uint32_t tick = g_sched.next_tick; // tick que se procesa ahora
+    feed_presses();
     sched_tick(&g_sched);
-    event_tx_kick();
 
     const uint32_t busy =
         static_cast<uint32_t>(esp_timer_get_time()) - start_us;
     if (busy > g_stats.max_busy_us) {
         g_stats.max_busy_us = busy;
     }
+
+    post_report_if_due(tick);
+    event_tx_kick();
 }
 
 static void worker_task(void *arg)
@@ -374,6 +480,11 @@ bool node_runtime_init(void)
     }
 
     leds_configure();
+
+    if (!button_init()) {
+        leds_fail();
+        return false;
+    }
 
     if (!event_tx_init()) {
         leds_fail();
@@ -465,6 +576,22 @@ uint8_t node_stop(void)
     }
     xSemaphoreGive(g_api_mutex);
     return status;
+}
+
+uint8_t node_sporadic_release(void)
+{
+    if (g_worker == nullptr) {
+        return NODE_REJECTED;
+    }
+    if (!g_running) {
+        return NODE_BAD_STATE;
+    }
+    if (!g_has_sporadic) {
+        return NODE_REJECTED;
+    }
+
+    g_host_presses = g_host_presses + 1; // único escritor: la tarea UART
+    return NODE_OK;
 }
 
 bool node_is_running(void)

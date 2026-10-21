@@ -4,9 +4,12 @@
 //   1. Plazos: trabajo activo con plazo absoluto <= k -> MISS y aborto.
 //   2. Liberaciones periódicas con next_release <= k (si el trabajo anterior
 //      sigue activo, caso D > T, se aborta como MISS antes de liberar).
-//   3. Selección según RMS o EDF.
-//   4. SWITCH si cambia la tarea en ejecución.
-//   5. Ejecución de un tramo: min(sn, UT restantes). Si termina -> COMPLETE
+//   3. Pulsaciones de la esporádica: cada una libera un trabajo solo si
+//      pasó el intervalo mínimo T desde la última liberación; si no, se
+//      ignora (SPORADIC_IGNORED) y se cuenta.
+//   4. Selección según RMS o EDF.
+//   5. SWITCH si cambia la tarea en ejecución.
+//   6. Ejecución de un tramo: min(sn, UT restantes). Si termina -> COMPLETE
 //      con marca k+1.
 
 static void emit(Scheduler *s, SchedEventType type, uint32_t tick,
@@ -52,6 +55,33 @@ static void abort_job(Scheduler *s, SchedSlot &slot, uint32_t tick)
     s->miss_count++;
     slot.task.job_active = false;
     slot.task.remaining = 0;
+}
+
+// Libera un trabajo de 'slot' en el tick k (aborta el anterior si seguía activo).
+static void release_job(Scheduler *s, SchedSlot &slot, uint32_t k)
+{
+    if (slot.task.job_active) {
+        abort_job(s, slot, k); // solo ocurre si D > T
+    }
+
+    slot.job_seq++;
+    slot.release_tick = k;
+    slot.task.job_active = true;
+    slot.task.remaining = slot.task.W;
+    slot.task.absolute_deadline = k + slot.task.D;
+
+    emit(s, SchedEventType::Release, k,
+         static_cast<uint16_t>(slot.task.id),
+         static_cast<uint16_t>(slot.job_seq & 0xFFFFU));
+}
+
+static void ignore_press(Scheduler *s, uint32_t k, uint16_t id, uint16_t reason,
+                         bool with_event)
+{
+    s->sporadic_ignored++;
+    if (with_event) {
+        emit(s, SchedEventType::SporadicIgnored, k, id, reason);
+    }
 }
 
 bool sched_init(Scheduler *s, Algorithm algorithm, uint32_t ut_per_tick,
@@ -121,6 +151,16 @@ bool sched_add_task(Scheduler *s, const Task *task, uint16_t *slot_out)
     return true;
 }
 
+void sched_sporadic_press(Scheduler *s, uint32_t presses)
+{
+    if (s == nullptr) {
+        return;
+    }
+
+    const uint32_t room = UINT32_MAX - s->pending_presses;
+    s->pending_presses += (presses < room) ? presses : room;
+}
+
 void sched_tick(Scheduler *s)
 {
     if (s == nullptr) {
@@ -145,26 +185,48 @@ void sched_tick(Scheduler *s)
             continue;
         }
 
-        if (slot.task.job_active) {
-            abort_job(s, slot, k); // solo ocurre si D > T
-        }
-
-        slot.job_seq++;
-        slot.release_tick = k;
-        slot.task.job_active = true;
-        slot.task.remaining = slot.task.W;
-        slot.task.absolute_deadline = k + slot.task.D;
+        release_job(s, slot, k);
 
         do {
             slot.task.next_release += slot.task.T;
         } while (slot.task.next_release <= k);
-
-        emit(s, SchedEventType::Release, k,
-             static_cast<uint16_t>(slot.task.id),
-             static_cast<uint16_t>(slot.job_seq & 0xFFFFU));
     }
 
-    // 3. Selección.
+    // 3. Pulsaciones de la tarea esporádica.
+    if (s->pending_presses > 0) {
+        const uint32_t presses = s->pending_presses;
+        s->pending_presses = 0;
+
+        SchedSlot *sporadic = nullptr;
+        for (size_t i = 0; i < s->count; ++i) {
+            if (s->slots[i].task.type == TaskType::Sporadic) {
+                sporadic = &s->slots[i];
+                break;
+            }
+        }
+
+        for (uint32_t p = 0; p < presses; ++p) {
+            const bool with_event = p < SCHED_MAX_PRESS_EVENTS_PER_TICK;
+
+            if (sporadic == nullptr) {
+                ignore_press(s, k, 0, SCHED_IGNORED_NO_TASK, with_event);
+                continue;
+            }
+
+            // Primera liberación siempre válida; luego, al menos T ticks
+            // desde la última liberación aceptada.
+            const bool allowed = (sporadic->job_seq == 0) ||
+                                 (k - sporadic->release_tick >= sporadic->task.T);
+            if (allowed) {
+                release_job(s, *sporadic, k);
+            } else {
+                ignore_press(s, k, static_cast<uint16_t>(sporadic->task.id),
+                             SCHED_IGNORED_MIN_INTERVAL, with_event);
+            }
+        }
+    }
+
+    // 4. Selección.
     SchedSlot *chosen = nullptr;
     for (size_t i = 0; i < s->count; ++i) {
         SchedSlot &slot = s->slots[i];
@@ -176,7 +238,7 @@ void sched_tick(Scheduler *s)
         }
     }
 
-    // 4. Cambio de tarea.
+    // 5. Cambio de tarea.
     const uint16_t new_id =
         (chosen != nullptr) ? static_cast<uint16_t>(chosen->task.id) : 0;
     if (new_id != s->running_id) {
@@ -184,7 +246,7 @@ void sched_tick(Scheduler *s)
         s->running_id = new_id;
     }
 
-    // 5. Un tramo de trabajo.
+    // 6. Un tramo de trabajo.
     if (chosen != nullptr) {
         uint32_t ut = chosen->task.remaining;
         if (ut > s->ut_per_tick) {

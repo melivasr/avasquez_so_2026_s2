@@ -17,6 +17,7 @@ import serial
 
 CAL_REQ, CAL_RESP, DEPLOY, START, STOP, ACK = 0x01, 0x02, 0x03, 0x04, 0x08, 0x09
 EVENT = 0x05
+TICK_REPORT = 0x06
 
 
 def crc16(data: bytes) -> int:
@@ -38,6 +39,8 @@ class Node:
         self.buf = bytearray()
         self.events = []          # (tipo, tick, id, arg) recibidos
         self.bad_event_frames = 0
+        self.reports = []         # dicts de TickReport recibidos
+        self.bad_report_frames = 0
         self.ser = serial.Serial()
         self.ser.port = port
         self.ser.baudrate = 115200
@@ -100,6 +103,26 @@ class Node:
         else:
             self.bad_event_frames += 1
 
+    REPORT_FIELDS = ("tick", "misses", "sporadic_ignored", "ticks_lost",
+                     "events_dropped", "bad_frames", "max_busy_us", "max_latency_us")
+
+    def _record_report(self, payload: bytes) -> None:
+        if len(payload) == 22:
+            values = struct.unpack("<IHHHHHII", payload)
+            self.reports.append(dict(zip(self.REPORT_FIELDS, values)))
+        else:
+            self.bad_report_frames += 1
+
+    def _record_async(self, frame) -> bool:
+        """Guarda Event y TickReport; devuelve True si la trama era una de ellas."""
+        if frame[0] == EVENT:
+            self._record_events(frame[1])
+            return True
+        if frame[0] == TICK_REPORT:
+            self._record_report(frame[1])
+            return True
+        return False
+
     def request(self, msg_type: int, payload: bytes = b"", timeout: float = 2.0):
         """Envía y devuelve la primera trama que no sea Event (los Event se guardan)."""
         self.ser.write(build(msg_type, payload))
@@ -111,8 +134,7 @@ class Node:
             frame = self.read_frame(remaining)
             if frame is None:
                 return None
-            if frame[0] == EVENT:
-                self._record_events(frame[1])
+            if self._record_async(frame):
                 continue
             return frame
 
@@ -121,8 +143,8 @@ class Node:
         deadline = time.monotonic() + seconds
         while time.monotonic() < deadline:
             frame = self.read_frame(min(0.1, max(0.0, deadline - time.monotonic())))
-            if frame is not None and frame[0] == EVENT:
-                self._record_events(frame[1])
+            if frame is not None:
+                self._record_async(frame)
 
 
 passed = 0
