@@ -96,8 +96,10 @@ bool parse_task_line(const char *line, size_t length, Task *task){
         return false;
     }
 
-    // id, W, T y D en 0 no tienen sentido
+    // id, W, T y D en 0 no tienen sentido, y el id tiene que caber
+    // en 16 bits (así va en los eventos)
     if (candidate.id == 0 ||
+        candidate.id > TASK_ID_MAX ||
         candidate.W == 0 ||
         candidate.T == 0 ||
         candidate.D == 0) {

@@ -9,8 +9,7 @@ Scheduler::Scheduler(){
 }
 
 bool Scheduler::configure(const Task *tasks, size_t count, uint32_t ut_per_tick){
-    if (count == 0 ||
-        count > MAX_TASKS ||
+    if (count > MAX_TASKS ||
         ut_per_tick == 0) {
         return false;
     }

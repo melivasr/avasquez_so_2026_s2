@@ -9,6 +9,7 @@
 
 #define TASK_FIELDS 6U // campos por línea
 #define TASK_LINE_MAX 96U // largo máximo de una línea
+#define TASK_ID_MAX 0xFFFFU // los eventos llevan el id en 2 bytes
 
 // Lee una línea (no necesita terminar en '\0'; se ignora un '\r' final).
 // Devuelve false si la línea está mal y entonces no toca task.

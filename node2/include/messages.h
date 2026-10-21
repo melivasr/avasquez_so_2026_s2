@@ -14,11 +14,12 @@
 #define EVENT_SIZE 13U // tick + event_type + task_id + value
 #define START_SIZE 3U // algoritmo + report_ticks
 
-// Códigos de estado del ACK
+// Códigos de estado del ACK 
 enum class StatusCode : uint8_t {
-    Ok = 0,    // comando aceptado
-    Error = 1, // carga inválida o comando no válido en el estado actual
+    Ok = 0,  // comando aceptado
+    Error = 1,  // carga inválida o rechazada 
     NotImplemented = 2, // tipo desconocido o que el nodo todavía no maneja
+    BadState = 3,       // comando no válido en el estado actual (NODE_BAD_STATE)
 };
 
 // Estado del nodo

@@ -64,19 +64,30 @@ static void handle_calibrate_req(const Frame *frame){
     static Frame reply;
     uint32_t requested_us = 0;
 
-    // carga inválida, tick fuera de rango o el calendarizador corriendo:
-    // el error va en un ACK
+    // carga inválida o tick fuera de rango: el error va en un ACK
     if (!parse_calibrate_req(frame, &requested_us) ||
         requested_us < TICK_MIN_US ||
-        requested_us > TICK_MAX_US ||
-        state == NodeState::Running) {
+        requested_us > TICK_MAX_US) {
         send_ack(frame, StatusCode::Error);
         return;
     }
 
-    ut_per_tick = calibration_measure(requested_us);
+    // no se calibra con el calendarizador corriendo
+    if (state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    const uint32_t measured = calibration_measure(requested_us);
+
+    // no cupo ni una UT en el tick: se rechaza y queda la calibración anterior
+    if (measured == 0) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
 
     // se guarda el tick para usarlo en START
+    ut_per_tick = measured;
     tick_us = requested_us;
     state = NodeState::Calibrated;
 
@@ -91,10 +102,14 @@ static void handle_deploy_tasks(const Frame *frame){
     static Task pending[MAX_TASKS];
     size_t count = 0;
 
-    // sin calibrar, corriendo, o alguna tarea mal escrita
-    if (state == NodeState::Uncalibrated ||
-        state == NodeState::Running ||
-        !parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+    // no se cambian las tareas con el calendarizador corriendo
+    if (state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
+    // alguna tarea mal escrita (se puede desplegar antes de calibrar)
+    if (!parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -104,7 +119,11 @@ static void handle_deploy_tasks(const Frame *frame){
         tasks[i] = pending[i];
     }
     task_count = count;
-    state = NodeState::Configured;
+
+    // sin calibrar sigue faltando la calibración para START
+    if (state != NodeState::Uncalibrated) {
+        state = NodeState::Configured;
+    }
 
     send_ack(frame, StatusCode::Ok);
 }
@@ -114,17 +133,21 @@ static void handle_start(const Frame *frame){
     Algorithm algorithm;
     uint16_t requested_report_ticks = 0;
 
-    // carga inválida, falta calibrar o desplegar tareas, o ya está corriendo
-    if (!parse_start(frame, &algorithm, &requested_report_ticks) ||
-        state == NodeState::Uncalibrated ||
-        state == NodeState::Running ||
-        task_count == 0) {
+    // carga inválida
+    if (!parse_start(frame, &algorithm, &requested_report_ticks)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
 
+    // falta calibrar o ya está corriendo. Sin tareas desplegadas
+    // sí arranca y queda esperando
+    if (state == NodeState::Uncalibrated ||
+        state == NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
+        return;
+    }
+
     // el calendarizador arranca de cero con las tareas desplegadas
-    // (falla si la calibración dio 0 UT por tick)
     Scheduler *chosen = &scheduler_edf;
     if (algorithm == Algorithm::RMS) {
         chosen = &scheduler_rms;
@@ -153,10 +176,15 @@ static void handle_start(const Frame *frame){
 
 // STOP: detiene el timer
 static void handle_stop(const Frame *frame){
-    // STOP no lleva carga, y solo se detiene si está corriendo
-    if (frame->length != 0 ||
-        state != NodeState::Running) {
+    // STOP no lleva carga
+    if (frame->length != 0) {
         send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // solo se detiene si está corriendo
+    if (state != NodeState::Running) {
+        send_ack(frame, StatusCode::BadState);
         return;
     }
 

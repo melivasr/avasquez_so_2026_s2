@@ -35,7 +35,7 @@ public:
     Scheduler();
     virtual ~Scheduler() {}
 
-    // Carga las tareas. Devuelve false si count es 0 o mayor a MAX_TASKS,
+    // Carga las tareas. Devuelve false si count es mayor a MAX_TASKS,
     // si ut_per_tick es 0 o si alguna tarea tiene T en 0.
     bool configure(const Task *tasks, size_t count, uint32_t ut_per_tick);
 
