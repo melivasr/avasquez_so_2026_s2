@@ -12,6 +12,7 @@
 #define ACK_SIZE 2U // tipo confirmado + status
 #define TICK_REPORT_SIZE 9U // tick + state + running_task_id
 #define EVENT_SIZE 13U // tick + event_type + task_id + value
+#define START_SIZE 3U // algoritmo + report_ticks
 
 #define FRAME_ERROR_CRC 1U    // CRC no coincide
 #define FRAME_ERROR_LENGTH 2U // largo mayor a 512 o trama incompleta
@@ -32,6 +33,16 @@ enum class NodeState : uint8_t {
     Stopped = 4,
     Error = 5,
 };
+
+// Algoritmo de calendarización 
+enum class Algorithm : uint8_t {
+    RMS = 0,
+    EDF = 1,
+};
+
+// Lee un START: algoritmo y cada cuántos ticks se manda TICK_REPORT
+// (0 = no se manda). 
+bool parse_start(const Frame *frame, Algorithm *algorithm, uint16_t *report_ticks);
 
 // Lee tick_us de un CALIBRATE_REQ.
 // Devuelve false si no es CALIBRATE_REQ o la carga no mide 4 bytes.

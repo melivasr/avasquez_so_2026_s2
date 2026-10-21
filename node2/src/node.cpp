@@ -3,12 +3,14 @@
 #include "node.h"
 #include "calibration.h"
 #include "messages.h"
+#include "scheduler/scheduler_edf.h"
+#include "scheduler/scheduler_rms.h"
 #include "task_parser.h"
 #include "tick_timer.h"
 #include "usb_communication.h"
-
-// Cada cuántos ticks se manda TICK_REPORT (luego vendrá en DEPLOY_TASKS)
-#define REPORT_EVERY_TICKS 100U
+extern "C" {
+#include "ut.h"
+}
 
 // Cada cuántos ticks cambia el LED (50 x 10 ms = medio segundo)
 #define LED_EVERY_TICKS 50U
@@ -21,12 +23,26 @@
 static NodeState state = NodeState::Uncalibrated;
 static uint32_t tick_us = TICK_DEFAULT_US;
 
+// UT por tick medidas en la última calibración (s_n)
+static uint32_t ut_per_tick = 0;
+
 // Ticks desde START
 static uint32_t tick_count = 0;
+
+// Cada cuántos ticks se envía TICK_REPORT (llega en START; 0 = no se envía)
+static uint16_t report_ticks = 0;
 
 // Tareas desplegadas por el host
 static Task tasks[MAX_TASKS];
 static size_t task_count = 0;
+
+// Calendarizadores. En START se elige uno según el algoritmo que trae
+static SchedulerRms scheduler_rms;
+static SchedulerEdf scheduler_edf;
+static Scheduler *scheduler = nullptr;
+
+// Tarea que corrió en el último tick (NO_TASK si ninguna)
+static uint32_t running_task = NO_TASK;
 
 static bool led = false;
 
@@ -53,7 +69,7 @@ static void handle_calibrate_req(const Frame *frame){
         return;
     }
 
-    const uint32_t ut_per_tick = calibration_measure(requested_us);
+    ut_per_tick = calibration_measure(requested_us);
 
     // se guarda el tick para usarlo en START
     tick_us = requested_us;
@@ -90,12 +106,25 @@ static void handle_deploy_tasks(const Frame *frame){
 
 // START: tick 0 y arranca el timer
 static void handle_start(const Frame *frame){
-    // START no lleva carga, hay que calibrar y desplegar tareas antes,
-    // y no puede estar corriendo
-    if (frame->length != 0 ||
+    Algorithm algorithm;
+    uint16_t requested_report_ticks = 0;
+
+    // carga inválida, falta calibrar o desplegar tareas, o ya está corriendo
+    if (!parse_start(frame, &algorithm, &requested_report_ticks) ||
         state == NodeState::Uncalibrated ||
         state == NodeState::Running ||
         task_count == 0) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // el calendarizador arranca de cero con las tareas desplegadas
+    // (falla si la calibración dio 0 UT por tick)
+    Scheduler *chosen = &scheduler_edf;
+    if (algorithm == Algorithm::RMS) {
+        chosen = &scheduler_rms;
+    }
+    if (!chosen->configure(tasks, task_count, ut_per_tick)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -106,6 +135,9 @@ static void handle_start(const Frame *frame){
         return;
     }
 
+    scheduler = chosen;
+    report_ticks = requested_report_ticks;
+    running_task = NO_TASK;
     tick_count = 0;
     state = NodeState::Running;
     send_ack(frame, StatusCode::Ok);
@@ -163,6 +195,21 @@ void node_handle_frame(const Frame *frame){
 }
 
 void node_tick(){
+    // el timer solo corre después de START, que elige el calendarizador
+    if (scheduler == nullptr) {
+        return;
+    }
+
+    // el calendarizador numera los ticks desde 0: el primero es el de START
+    const uint32_t now = tick_count;
+    const TickDecision decision = scheduler->tick(now);
+
+    // ejecutar el tramo de trabajo de este tick
+    for (uint32_t i = 0; i < decision.units; i++) {
+        unidad_trabajo();
+    }
+    running_task = decision.task_id;
+
     tick_count++;
 
     // cada LED_EVERY_TICKS ticks se cambia el LED
@@ -171,11 +218,12 @@ void node_tick(){
         digitalWrite(LED_BUILTIN, led);
     }
 
-    // cada REPORT_EVERY_TICKS ticks se avisa al host
-    if (tick_count % REPORT_EVERY_TICKS == 0) {
+    // cada report_ticks ticks se avisa al host (con 0 no se avisa)
+    if (report_ticks != 0 &&
+        tick_count % report_ticks == 0) {
         static Frame report;
 
-        build_tick_report(&report, tick_count, state, NO_TASK);
+        build_tick_report(&report, tick_count, state, running_task);
         usb_send(&report);
     }
 }

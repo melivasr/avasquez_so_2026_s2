@@ -11,6 +11,11 @@ static void write_u32_le(uint8_t *bytes, uint32_t value){
     bytes[3] = (value >> 24) & 0xFF;  // bits 24-31
 }
 
+// Lee un número de 16 bits de 2 bytes, byte bajo primero (little-endian).
+static uint16_t read_u16_le(const uint8_t *bytes){
+    return (uint16_t)(bytes[0] | (bytes[1] << 8));
+}
+
 // Lee un número de 32 bits de 4 bytes, byte bajo primero (little-endian).
 static uint32_t read_u32_le(const uint8_t *bytes){
     uint32_t value = bytes[0];  // bits 0-7
@@ -30,6 +35,28 @@ bool parse_calibrate_req(const Frame *frame, uint32_t *tick_us){
     }
 
     *tick_us = read_u32_le(&frame->payload[0]);
+    return true;
+}
+
+// START: [algoritmo (1)] [report_ticks (2)]
+bool parse_start(const Frame *frame, Algorithm *algorithm, uint16_t *report_ticks){
+    // tiene que haber frame y salidas, ser un START y la carga medir 3 bytes
+    if (!frame || !algorithm || !report_ticks ||
+        frame->type != (uint8_t)MessageType::Start ||
+        frame->length != START_SIZE) {
+        return false;
+    }
+
+    const uint8_t algorithm_code = frame->payload[0];
+
+    // el algoritmo es RMS o EDF
+    if (algorithm_code != (uint8_t)Algorithm::RMS &&
+        algorithm_code != (uint8_t)Algorithm::EDF) {
+        return false;
+    }
+
+    *algorithm = (Algorithm)algorithm_code;
+    *report_ticks = read_u16_le(&frame->payload[1]);
     return true;
 }
 
