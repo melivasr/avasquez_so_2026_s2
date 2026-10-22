@@ -44,6 +44,12 @@ uint8_t node_start(Algorithm algorithm, uint16_t report_n,
 // volver (el ACK de Stop sale después). NODE_BAD_STATE si no estaba en ejecución.
 uint8_t node_stop(void);
 
+// Agrega una tarea con el nodo en ejecución. La aplica la tarea calendarizadora
+// entre dos ticks y emite TASK_ADDED. Bloquea hasta ~un tick.
+// NODE_OK = aplicada (slot_out = ranura 1..8); NODE_REJECTED = la tabla del
+// calendarizador la rechazó; NODE_BAD_STATE = el nodo no está en ejecución.
+uint8_t node_add_task(const Task *task, uint16_t *slot_out);
+
 // Registra una pulsación de la tarea esporádica pedida por el host (equivale
 // al botón). NODE_OK = registrada (el calendarizador decide en el siguiente
 // tick si libera o ignora; se informa por Event); NODE_REJECTED = el nodo no

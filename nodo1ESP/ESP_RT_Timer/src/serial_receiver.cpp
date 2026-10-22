@@ -227,6 +227,61 @@ static void process_sporadic_release(const Frame &frame)
     send_ack(MessageType::SporadicRelease, node_sporadic_release());
 }
 
+// Límite de la línea: parse_task_line usa un búfer de 96 B (95 + NUL).
+static constexpr size_t TASK_LINE_MAX = 95;
+
+static void process_add_task(const Frame &frame)
+{
+    size_t length = frame.length;
+
+    // Se tolera un '\n' final.
+    if (length > 0 && frame.payload[length - 1] == '\n') {
+        --length;
+    }
+
+    // Vacía, demasiado larga o con NUL embebido (strtok truncaría sin error).
+    if (length == 0 || length > TASK_LINE_MAX ||
+        memchr(frame.payload, '\0', length) != nullptr) {
+        send_ack(MessageType::AddTask, NODE_REJECTED);
+        return;
+    }
+
+    char line[TASK_LINE_MAX + 1];
+    memcpy(line, frame.payload, length);
+    line[length] = '\0';
+
+    Task task = {};
+    if (!parse_task_line(line, &task) ||
+        task.id > SCHED_MAX_TASK_ID ||
+        deployed_count >= MAX_DEPLOYED_TASKS) {
+        send_ack(MessageType::AddTask, NODE_REJECTED);
+        return;
+    }
+
+    for (size_t j = 0; j < deployed_count; ++j) {
+        if (deployed_tasks[j].id == task.id ||
+            (deployed_tasks[j].type == TaskType::Sporadic &&
+             task.type == TaskType::Sporadic)) {
+            send_ack(MessageType::AddTask, NODE_REJECTED);
+            return;
+        }
+    }
+
+    // En ejecución, primero el calendarizador; la tabla del hilo UART solo
+    // cambia si la aceptó (así ambas tablas siguen iguales).
+    if (node_is_running()) {
+        uint16_t slot = 0;
+        const uint8_t status = node_add_task(&task, &slot);
+        if (status != NODE_OK) {
+            send_ack(MessageType::AddTask, status);
+            return;
+        }
+    }
+
+    deployed_tasks[deployed_count++] = task;
+    send_ack(MessageType::AddTask, NODE_OK);
+}
+
 static void process_received_frame(const uint8_t *data, size_t length)
 {
     if (!decode_frame(data, length, &decoded_frame)) {
@@ -249,6 +304,8 @@ static void process_received_frame(const uint8_t *data, size_t length)
         process_stop(decoded_frame);
     } else if (decoded_frame.type == MessageType::SporadicRelease) {
         process_sporadic_release(decoded_frame);
+    } else if (decoded_frame.type == MessageType::AddTask) {
+        process_add_task(decoded_frame);
     } else {
         // Tipo válido a nivel de trama, pero aún no implementado.
         send_ack(decoded_frame.type, 2);

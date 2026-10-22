@@ -24,6 +24,26 @@ static constexpr size_t REPORT_MAX = 32;
 static uint8_t g_report[REPORT_MAX];
 static size_t g_report_len = 0; // 0 = no hay reporte pendiente
 
+// Envía el TickReport pendiente, si lo hay. Solo la llama la tarea de transmisión.
+static void send_pending_report()
+{
+    uint8_t report[REPORT_MAX];
+    size_t report_len = 0;
+
+    portENTER_CRITICAL(&g_lock);
+    report_len = g_report_len;
+    if (report_len > 0) {
+        memcpy(report, g_report, report_len);
+        g_report_len = 0;
+    }
+    portEXIT_CRITICAL(&g_lock);
+
+    if (report_len > 0) {
+        serial_send_frame(MessageType::TickReport, report,
+                          static_cast<uint16_t>(report_len));
+    }
+}
+
 static void tx_task(void *arg)
 {
     (void)arg;
@@ -47,24 +67,14 @@ static void tx_task(void *arg)
             // Si la escritura falla, ese lote se pierde (sin reintento).
             serial_send_frame(MessageType::Event, payload,
                               static_cast<uint16_t>(length));
+
+            // Con el búfer saturado este bucle no termina: el reporte debe
+            // salir entre lotes para no quedar sin enviarse.
+            send_pending_report();
         }
 
-        // Reporte pendiente (si lo hay): sale después de los eventos.
-        uint8_t report[REPORT_MAX];
-        size_t report_len = 0;
-
-        portENTER_CRITICAL(&g_lock);
-        report_len = g_report_len;
-        if (report_len > 0) {
-            memcpy(report, g_report, report_len);
-            g_report_len = 0;
-        }
-        portEXIT_CRITICAL(&g_lock);
-
-        if (report_len > 0) {
-            serial_send_frame(MessageType::TickReport, report,
-                              static_cast<uint16_t>(report_len));
-        }
+        // Reporte pendiente sin eventos en cola.
+        send_pending_report();
 
         if (g_flush_requested) {
             g_flush_requested = false;

@@ -479,6 +479,37 @@ static void test_sporadic_overlap_aborts()
     CHECK(rel.size() == 2 && rel[1].tick == 2 && rel[1].arg == 2);
 }
 
+static void test_add_sporadic_while_running()
+{
+    printf("esporádica agregada con el sistema en marcha\n");
+    Recorder r;
+    Scheduler s;
+    CHECK(sched_init(&s, Algorithm::EDF, 10, sink, work, &r));
+    add(&s, mk(1, 'P', 10, 4, 4, 1));        // C=1, T=4
+    run(&s, 3);                              // ticks 0..2
+
+    uint16_t slot = 0;
+    Task sp = mk(3, 'S', 20, 50, 50, 3);     // C=2, T=D=50
+    CHECK(sched_add_task(&s, &sp, &slot));
+    CHECK(slot == 2);
+    run(&s, 2);                              // ticks 3..4: no se libera sola
+    CHECK(of_id(r.events, SchedEventType::Release, 3).empty());
+
+    sched_sporadic_press(&s, 1);
+    run(&s, 4);                              // ticks 5..8
+    std::vector<SchedEvent> rel = of_id(r.events, SchedEventType::Release, 3);
+    CHECK(rel.size() == 1);
+    if (rel.size() == 1) {
+        CHECK(rel[0].tick == 5 && rel[0].arg == 1);
+    }
+    std::vector<SchedEvent> done = of_id(r.events, SchedEventType::Complete, 3);
+    CHECK(done.size() == 1);
+    if (done.size() == 1) {
+        CHECK(done[0].tick == 7);            // tramos en 5 y 6 (predicción)
+    }
+    CHECK(s.miss_count == 0);
+}
+
 int main()
 {
     test_cost_and_slices();
@@ -496,6 +527,7 @@ int main()
     test_press_event_cap_and_saturation();
     test_sporadic_with_periodic();
     test_sporadic_overlap_aborts();
+    test_add_sporadic_while_running();
 
     printf("\n%d comprobaciones, %d fallos\n", g_checks, g_failed);
     return g_failed == 0 ? 0 : 1;

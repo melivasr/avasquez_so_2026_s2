@@ -52,7 +52,7 @@ static constexpr uint32_t NOTIFY_CMD = 1U << 1;  // desde la tarea UART
 // Estado
 // ================================================================
 
-enum class CmdType : uint8_t { None, Calibrate, Start, Stop };
+enum class CmdType : uint8_t { None, Calibrate, Start, Stop, AddTask };
 
 // Una orden a la vez: la tarea UART la llena y espera a g_done.
 struct Command {
@@ -60,9 +60,10 @@ struct Command {
     uint8_t status;
     uint32_t tick_us;     // Calibrate
     uint32_t sn_result;   // Calibrate
+    uint16_t slot_result; // AddTask
     Algorithm algorithm;  // Start
     uint16_t report_n;    // Start
-    size_t task_count;    // Start
+    size_t task_count;    // Start (AddTasks usa tasks[0] con task_count = 1)
     Task tasks[MAX_TASKS];
 };
 
@@ -358,6 +359,32 @@ static uint8_t do_stop()
     return NODE_OK;
 }
 
+static uint8_t do_add_task()
+{
+    if (!g_running) {
+        return NODE_BAD_STATE;
+    }
+
+    uint16_t slot = 0;
+    if (!sched_add_task(&g_sched, &g_cmd.tasks[0], &slot)) {
+        return NODE_REJECTED;
+    }
+
+    if (g_cmd.tasks[0].type == TaskType::Sporadic) {
+        g_has_sporadic = true; // habilita SporadicRelease del host
+    }
+
+    // Estamos entre ticks: next_tick es el próximo a procesar, y ahí se
+    // libera por primera vez una periódica (next_release = next_tick).
+    event_tx_push(static_cast<uint8_t>(NodeEventType::TaskAdded),
+                  g_sched.next_tick,
+                  static_cast<uint16_t>(g_cmd.tasks[0].id), slot);
+    event_tx_kick();
+
+    g_cmd.slot_result = slot;
+    return NODE_OK;
+}
+
 static void handle_command()
 {
     switch (g_cmd.type) {
@@ -380,6 +407,10 @@ static void handle_command()
 
     case CmdType::Stop:
         g_cmd.status = do_stop();
+        break;
+
+    case CmdType::AddTask:
+        g_cmd.status = do_add_task();
         break;
 
     default:
@@ -573,6 +604,28 @@ uint8_t node_stop(void)
         // La ejecución ya terminó: se entregan los eventos pendientes antes
         // de que la tarea UART envíe el ACK de Stop.
         event_tx_flush();
+    }
+    xSemaphoreGive(g_api_mutex);
+    return status;
+}
+
+uint8_t node_add_task(const Task *task, uint16_t *slot_out)
+{
+    if (g_worker == nullptr || task == nullptr) {
+        return NODE_REJECTED;
+    }
+    if (!g_running) {
+        return NODE_BAD_STATE;
+    }
+
+    xSemaphoreTake(g_api_mutex, portMAX_DELAY);
+    g_cmd = Command{};
+    g_cmd.type = CmdType::AddTask;
+    g_cmd.task_count = 1;
+    g_cmd.tasks[0] = *task;
+    const uint8_t status = submit();
+    if (status == NODE_OK && slot_out != nullptr) {
+        *slot_out = g_cmd.slot_result;
     }
     xSemaphoreGive(g_api_mutex);
     return status;

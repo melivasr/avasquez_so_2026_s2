@@ -10,7 +10,7 @@ Documento para quienes desarrollan el host. El contrato entre host y nodo es **s
 | **[implementado, sin probar por cable]** | Existe en el código del nodo; sin evidencia por cable. |
 | **[propuesto — pendiente de acordar con el host]** | Solo diseño. No existe en el nodo. No programar contra esto hasta acordarlo. |
 
-Versión del documento: borrador 8 (tarea esporádica probada por cable con el host y con el botón real; faltan el intervalo mínimo y las pulsaciones rápidas con el botón).
+Versión del documento: borrador 10 (AddTask implementado, sin probar por cable).
 
 ---
 
@@ -152,16 +152,22 @@ Si el host se detiene o desconecta **sin enviar Stop**, el nodo sigue ejecutando
 
 Se rechaza con `ACK(0x03, 3)`. Para agregar tareas en marcha se usa `AddTask`.
 
-### 9.4 AddTask (0x0A), host → nodo (modo manual)
+### 9.4 AddTask (0x0A), host → nodo (modo manual) — [implementado — probado por cable]
 
-Carga: **una** línea de texto con el mismo formato que en `DeployTasks`, sin `\n`. Válido en estado inactivo y en ejecución. El host ya hizo la admisión; el nodo solo valida formato, ID único, tabla no llena y una sola esporádica.
+Carga: una línea de texto con el formato de DeployTasks (id,tipo,W,T,D,criticidad), de 1 a 95 bytes; se tolera un \n final. Válido en reposo y en ejecución. El host ya hizo la admisión; el nodo solo valida formato, id ≤ 65535, id único, tabla con menos de 8 tareas y una sola esporádica. Una carga vacía, demasiado larga o con byte NUL se rechaza.
 
-- En ejecución, la tarea se activa en el siguiente límite de tick; el nodo emite un evento `TASK_ADDED` con el tick de primera liberación.
-- Respuestas: `ACK(0x0A, 0)` aceptada, `1` rechazada, `3` sin calibración.
+Respuestas: ACK(0x0A, 0) aplicada; ACK(0x0A, 1) rechazada. Cambio respecto al texto anterior: ya no existe 3 por falta de calibración; el nodo no la exige aquí.
+En reposo: se agrega al final de la tabla, sin evento. Un DeployTasks posterior reemplaza toda la tabla.
+En ejecución: se aplica entre dos ticks y el ACK sale después de aplicarla (puede tardar hasta un tick). Las periódicas se liberan por primera vez en el siguiente tick a procesar. Se emite TASK_ADDED (9.5) con tick = tick de primera liberación, id y arg = ranura 1..8. El ACK y TASK_ADDED viajan por rutas distintas: el host no debe asumir cuál llega primero.
+Esporádica agregada en marcha: tick = tick en que se aplicó (no tiene primera liberación propia); desde ese momento SporadicRelease y el botón la usan.
+Persistencia: las tareas agregadas se conservan tras Stop; un Start posterior las ejecuta (solo un nuevo DeployTasks las borra).
+Las ranuras no se reutilizan (no hay baja de tareas).
 
-### 9.5 Event (0x05), nodo → host — [RELEASE, SWITCH, COMPLETE y MISS probados por cable]
+Probado por cable (tick de 10 ms, EDF y RMS, test_addtask.py: 103 de 103): rechazos con ACK(0x0A, 1) de id repetido, carga vacía, solo \n, 200 B, NUL embebido, basura, id > 65535, tipo inválido, W = 0 y campos faltantes, sin alterar la ejecución; aceptación en ejecución con flujo de eventos idéntico al modelo; persistencia tras Stop/Start; aceptación en reposo; octava tarea aceptada y novena rechazada; esporádica agregada en marcha (la segunda esporádica se rechaza y SporadicRelease pasa a registrarse). No probado: coma doble en la línea, límite exacto de 95 B, ticks de 1 ms, orden relativo entre el ACK y TASK_ADDED.
 
-Probado por cable (conjuntos de tareas A y B, RMS y EDF, tick de 10 ms, 300 ticks comparados, 49 de 49 comprobaciones): RELEASE, SWITCH, COMPLETE y MISS coinciden evento por evento con un modelo del calendarizador; marcas de tiempo no decrecientes; tramas bien formadas; sin TICK_LOST; ningún `Event` después del ACK de `Stop`. **No probado:** búfer lleno (descartes), ticks de 1 ms, corridas largas (cada corrida duró ~4 s) y el propio TICK_LOST (implementado, nunca provocado). SPORADIC_IGNORED con motivo 0 (vía `SporadicRelease`) está probado por cable; el motivo 1 (sin tarea esporádica, solo ocurre con el botón) no se ha probado. **No implementados:** TASK_ADDED y BAD_FRAME (se agregan con sus funciones).
+### 9.5 Event (0x05), nodo → host — [RELEASE, SWITCH, COMPLETE, MISS, TASK_ADDED probados por cable]
+
+Probado por cable (conjuntos de tareas A y B, RMS y EDF, tick de 10 ms, 300 ticks comparados, 49 de 49 comprobaciones): RELEASE, SWITCH, COMPLETE y MISS coinciden evento por evento con un modelo del calendarizador; marcas de tiempo no decrecientes; tramas bien formadas; sin TICK_LOST; ningún `Event` después del ACK de `Stop`. **No probado:** búfer lleno (descartes), ticks de 1 ms, corridas largas (cada corrida duró ~4 s) y el propio TICK_LOST (implementado, nunca provocado). SPORADIC_IGNORED con motivo 0 (vía `SporadicRelease`) está probado por cable; el motivo 1 (sin tarea esporádica, solo ocurre con el botón) no se ha probado. **TASK_ADDED probado por cable (9.4). No implementado: BAD_FRAME**.
 
 Comportamiento del búfer: 256 registros en RAM, transmitidos en segundo plano por una tarea aparte; el calendarizador solo encola. Si el búfer se llena se **descarta el evento nuevo** y se cuenta; el host se entera por el contador `eventos_descartados` del `TickReport` (9.6); con `N` = 0 no hay aviso. El `Start` vacía el búfer. Orden: las marcas `tick` son no decrecientes; COMPLETE se estampa con el tick de fin del tramo. Punto abierto para acordar con el host: al hacer `Stop` no se emite un evento de fin de ejecución; si el host lo necesita para cerrar el Gantt, se propone agregarlo.
 
@@ -222,7 +228,7 @@ Reglas de uso para el host:
 
 ### 9.7 Tarea esporádica, botón y SporadicRelease (0x07) — [probado por cable]
 
-Probado por cable (tick de 10 ms, EDF y RMS, tarea esporádica con C = 2, T = D = 50 ticks junto a una periódica): la esporádica no se libera sola; tres `SporadicRelease` producen 2 liberaciones y 1 ignorada (motivo 0), separadas al menos `T`; números de trabajo consecutivos; cada liberación tiene su COMPLETE; latencia de respuesta de 2 a 3 ticks (medida liberación → fin, con la periódica de mayor prioridad); sin plazos perdidos; `ACK(0x07, 3)` sin ejecución, `ACK(0x07, 1)` sin esporádica o con carga no vacía. Con el botón real (GPIO 27): 6 pulsaciones lentas produjeron exactamente 6 liberaciones, ninguna ignorada y ningún rebote contado (incluido el rebote al soltar); latencias de 2 a 3 ticks. **No probado por cable:** pulsaciones rápidas con el botón (intervalo mínimo con el botón real), pulsaciones separadas menos de 50 ms, el motivo 1 de SPORADIC_IGNORED, dos pulsaciones en un mismo tick y `D` > `T` con la esporádica (solo en pruebas aisladas).
+Probado por cable (tick de 10 ms, EDF y RMS, tarea esporádica con C = 2, T = D = 50 ticks junto a una periódica): la esporádica no se libera sola; tres `SporadicRelease` producen 2 liberaciones y 1 ignorada (motivo 0), separadas al menos `T`; números de trabajo consecutivos; cada liberación tiene su COMPLETE; latencia de respuesta de 2 a 3 ticks (medida liberación → fin, con la periódica de mayor prioridad); sin plazos perdidos; `ACK(0x07, 3)` sin ejecución, `ACK(0x07, 1)` sin esporádica o con carga no vacía. Con el botón real (GPIO 27): 6 pulsaciones lentas produjeron exactamente 6 liberaciones, ninguna ignorada y ningún rebote contado (incluido el rebote al soltar); latencias de 2 a 3 ticks. Segunda prueba con el botón real (20 s, 15 pulsaciones entre lentas y rápidas): 9 liberaciones y 6 ignoradas (motivo 0) = 15 pulsaciones; cada ignorada cayó a menos de `T` ticks de una liberación; liberaciones separadas al menos `T`; ningún rebote contado; latencias de 2 a 3 ticks; `esporadicas_ignoradas` coincidió con los eventos. **No probado por cable:** pulsaciones separadas menos de 50 ms (antirrebote con rebotes reales), el motivo 1 de SPORADIC_IGNORED, dos pulsaciones en un mismo tick con el botón y `D` > `T` con la esporádica (solo en pruebas aisladas).
 
 **Tarea esporádica.** Se declara en `DeployTasks` con tipo `S` (máximo una por nodo). Nunca se libera sola. `T` es el intervalo mínimo entre liberaciones y `D` su plazo; para la admisión el host la trata como periódica con periodo `T`.
 
@@ -243,6 +249,8 @@ Verificado por el desarrollador del nodo en una demostración con tareas fijas (
 
 Ranura = posición de la tarea en el despliegue (1 a 8); `AddTask` usa la siguiente ranura libre. Los 4 LEDs muestran el índice de ranura en binario (0 = ocioso). Los eventos usan el `id` de la tarea, no la ranura.
 
+No observado: el LED de ranura de una tarea agregada en marcha
+
 ## 10. Límites del nodo
 
 | Límite | Valor | Estado |
@@ -254,9 +262,20 @@ Ranura = posición de la tarea en el despliegue (1 a 8); `AddTask` usa la siguie
 | Esporádicas por nodo | 1 | implementado en `DeployTasks`, sin probar por cable |
 | `id` de tarea | ≤ 65535 | implementado en `DeployTasks`, sin probar por cable |
 
+
+| Parámetro | Límite Máximo | Estado / Comportamiento (Validación por Cable) |
+| :--- | :--- | :--- |
+| **Tareas simultáneas** | 8 | Acepta 8. La novena es rechazada mediante `AddTask`. |
+| **Longitud de línea** | ≤ 95 caracteres | Rechaza 200 B. El límite exacto solo se encuentra en memoria. |
+| **Esporádicas por nodo** | 1 | Probado y verificado en `Deploy` y `AddTask`. |
+| **ID de tarea** | ≤ 65535 | Límite de valor validado en `Deploy` y `AddTask`. |
+
+
 ## 11. Registro de cambios
 
 - Borrador 0: documento inicial. Solo la sección 9 es nueva respecto al código existente; el resto documenta lo ya verificado.
+- Borrador 10: AddTask (0x0A) y evento TASK_ADDED probados por cable (test_addtask.py, 103 de 103; regresión de test_start_stop.py 18 de 18 en EDF y RMS, test_events.py 49 de 49, test_tickreport.py 65 de 65, test_sporadic.py 43 de 43 y 57 de 57 con botón). Formato nuevo, pendiente de acordar con el host. AddTask no usa el estado 3 (se retira “sin calibración” de 9.4).
+- Borrador 9: sin cambios de formato. Intervalo mínimo de la esporádica probado con el botón real (15 pulsaciones = 9 liberaciones + 6 ignoradas).
 - Borrador 8: sin cambios de formato. Tarea esporádica probada por cable (`test_sporadic.py`: 43 de 43 con `SporadicRelease`; 57 de 57 con el botón real, 6 pulsaciones lentas).
 - Borrador 7: tarea esporádica implementada (botón GPIO 27 con antirrebote de 50 ms, intervalo mínimo, `SporadicRelease`, evento SPORADIC_IGNORED con motivo en `arg`, contador `esporadicas_ignoradas`). Cambio de formato: el campo `arg` de SPORADIC_IGNORED pasa de "siempre 0" a un código de motivo. Sin probar por cable.
 - Borrador 6: sin cambios de formato. `TickReport` probado por cable (`test_tickreport.py`).

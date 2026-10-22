@@ -19,8 +19,8 @@ void event_tx_reset(void);
 void event_tx_push(uint8_t type, uint32_t tick, uint16_t id, uint16_t arg);
 
 // Deja listo un TickReport (carga ya codificada, máx. 32 B). Si había otro
-// sin enviar, se reemplaza (solo importa el más reciente). Se transmite
-// después de los eventos que ya estén en el búfer.
+// sin enviar, se reemplaza (solo importa el más reciente). 
+// Se transmite entre lotes de eventos (puede salir antes que eventos aún en cola).
 void event_tx_post_report(const uint8_t *payload, size_t length);
 
 // Avisa a la tarea de transmisión que hay eventos o un reporte pendientes.

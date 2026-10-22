@@ -97,35 +97,3 @@ bool parse_task_line(const char *line, Task *out)
     *out = candidate;
     return true;
 }
-
-bool load_local_tasks(Task tasks[], size_t capacity, size_t *count)
-{
-    if (tasks == nullptr || count == nullptr || capacity == 0) {
-        return false;
-    }
-
-    static const char *lines[] = {
-        "3,P,40,20,20,2",
-        "4,P,10,10,8,1",
-        "5,S,6,15,10,3"
-    };
-
-    *count = 0;
-
-    for (const char *line : lines) {
-        if (*count >= capacity) {
-            return false;
-        }
-
-        Task candidate = {};
-
-        if (!parse_task_line(line, &candidate)) {
-            return false;
-        }
-
-        tasks[*count] = candidate;
-        ++(*count);
-    }
-
-    return true;
-}
