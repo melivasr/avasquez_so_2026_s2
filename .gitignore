@@ -28,3 +28,5 @@
 /nodo1ESP/ESP_RT_Timer/**/*.bak
 /nodo1ESP/ESP_RT_Timer/**/*~
 /nodo1ESP/ESP_RT_Timer/**/*.log
+
+.codex/
