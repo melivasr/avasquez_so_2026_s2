@@ -19,6 +19,7 @@ typedef struct {
     int wake[NODES],signals;
     bool started[NODES],failed[NODES],expected_exit[NODES],quit,stop_nodes,fatal;
     uint64_t start_ns[NODES];
+    uint32_t pending_timeout[NODES];
     Task ids[TASK_CAP];
     size_t ids_count;
 } Host;
@@ -75,6 +76,7 @@ static bool send_command(Host *h,int n,const Frame *f) {
         .kind=R_COMMAND,.node=n,.frame=*f
     };
     if(queue_push(&h->shared->commands[n],&r,20)<0)return false;
+    h->pending_timeout[n]=command_timeout_ms(&h->cfg,f->type);
     return eventfd_write(h->wake[n],1)==0;
 }
 
@@ -82,7 +84,7 @@ static Record await_reply(Host *h,int n) {
     Record r= {
         .code=REPLY_IO
     };
-    uint64_t end=monotonic_ns()+((uint64_t)h->cfg.timeout_ms*2+250)*1000000;
+    uint64_t end=monotonic_ns()+((uint64_t)h->pending_timeout[n]*2+1500)*1000000;
     while(monotonic_ns()<end && h->drivers[n]>0) {
         if(queue_pop(&h->shared->replies[n],&r,50)==0) {
             inspect(h);
@@ -233,9 +235,8 @@ static void command(Host *h,const char *line) {
             return;
         }
         Frame f= {
-            .type=SPORADIC,.length=4
+            .type=SPORADIC
         };
-        put32(f.data,id);
         Record r=transaction(h,node,&f);
         note(h->shared,node,"solicitud esporádica id=%"PRIu32": %s; el nodo decide liberación/intervalo mínimo",id,r.code==REPLY_OK?"confirmada":r.code==REPLY_REJECT?"rechazada":"incierta");
         if(r.code==REPLY_UNCERTAIN || r.code==REPLY_IO)quarantine(h,node);
@@ -275,21 +276,6 @@ static void bootstrap(Host *h,Task *tasks,size_t count) {
         } else note(h->shared,n,"calibración inválida o sin respuesta; nodo excluido");
     }
     if(h->quit)return;
-    for(int n=0;n<NODES;n++)if(h->nodes[n].operational && !h->quit) {
-        Frame f= {
-            .type=CONFIGURE,.length=6
-        };
-        f.data[0]=1;
-        f.data[1]=(uint8_t)h->cfg.algorithm;
-        put32(f.data+2,h->cfg.report_ticks);
-        Record r=transaction(h,n,&f);
-        if(r.code!=REPLY_OK) {
-            h->nodes[n].operational=false;
-            note(h->shared,n,"firmware no confirma CONFIGURE v1; integración incompleta, nodo excluido");
-            fprintf(stderr,"%s: falta CONFIGURE v1 o comunicación. Ver docs/PROTOCOL.md\n",n?"Pico":"ESP32");
-        }
-    }
-    if(h->quit)return;
     uint32_t fastest=h->nodes[0].speed>h->nodes[1].speed?h->nodes[0].speed:h->nodes[1].speed;
     if(!fastest)fastest=1;
     sort_tasks(tasks,count,fastest);
@@ -298,7 +284,7 @@ static void bootstrap(Host *h,Task *tasks,size_t count) {
         int n=place(h->nodes,&tasks[i],h->cfg.algorithm,h->cfg.heuristic,err,sizeof err);
         log_task(h,n,&tasks[i],n<0?3:0,n<0?err:"ADMITIDA por análisis; pendiente de despliegue");
     }
-    for(int n=0;n<NODES;n++) if(h->nodes[n].operational && h->nodes[n].count && !h->quit) {
+    for(int n=0;n<NODES;n++) if(h->nodes[n].operational && !h->quit) {
         Frame f=task_frame(DEPLOY,h->nodes[n].tasks,h->nodes[n].count);
         Record r=transaction(h,n,&f);
         if(r.code==REPLY_OK) {
@@ -309,9 +295,7 @@ static void bootstrap(Host *h,Task *tasks,size_t count) {
         }
     }
     if(h->quit)return;
-    Frame start= {
-        .type=START
-    };
+    Frame start=start_frame(&h->cfg);
     uint64_t begin[2]= {
         0
     },ack[2]= {

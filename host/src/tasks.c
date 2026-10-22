@@ -57,7 +57,7 @@ bool task_parse(const char *line, Task *out, char *err, size_t n) {
     Task t= {
         0
     };
-    if (!parse_u32(f[0],&t.id) || !t.id || t.id==NO_TASK || !parse_u32(f[2],&t.W) || !t.W || !parse_u32(f[3],&t.T) || !t.T || !parse_u32(f[4],&t.D) || !t.D) return fail(err,n,"id [1,4294967294]; W/T/D positivos uint32");
+    if (!parse_u32(f[0],&t.id) || !t.id || t.id>RT_MAX_TASK_ID || !parse_u32(f[2],&t.W) || !t.W || !parse_u32(f[3],&t.T) || !t.T || !parse_u32(f[4],&t.D) || !t.D) return fail(err,n,"id [1,65535]; W/T/D positivos uint32");
     if (strlen(f[1])!=1 || (f[1][0]!='P' && f[1][0]!='S')) return fail(err,n,"tipo debe ser P o S");
     t.type=f[1][0];
     const char *p=f[5];

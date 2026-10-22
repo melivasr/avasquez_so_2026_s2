@@ -31,6 +31,9 @@ void driver_run(Shared *s,int n,int wake,const Config *cfg) {
         note(s,n,"puerto %s: %s",cfg->ports[n],strerror(errno));
         io_failure(s,n);
     }
+    /* Algunas placas se reinician al abrir USB/DTR. Antes de la primera orden
+     * se da tiempo de arranque, sin retransmitir operaciones con efectos. */
+    if(fd>=0)poll(NULL,0,1000);
     Parser parser= {
         0
     };
@@ -90,7 +93,8 @@ void driver_run(Shared *s,int n,int wake,const Config *cfg) {
                 pending=c;
                 uint8_t bytes[FRAME_SIZE];
                 size_t len=frame_encode(&c.frame,bytes);
-                if(!len || serial_write(fd,bytes,len,cfg->timeout_ms)<0) {
+                uint32_t command_ms=command_timeout_ms(cfg,c.frame.type);
+                if(!len || serial_write(fd,bytes,len,command_ms)<0) {
                     reply(s,n,REPLY_UNCERTAIN,NULL);
                     io_failure(s,n);
                     close(fd);
@@ -98,7 +102,7 @@ void driver_run(Shared *s,int n,int wake,const Config *cfg) {
                     continue;
                 }
                 active=true;
-                deadline=monotonic_ns()+(uint64_t)cfg->timeout_ms*1000000;
+                deadline=monotonic_ns()+(uint64_t)command_ms*1000000;
                 note(s,n,"envío tipo %u terminado a %llu ns (recepción ACK pendiente)",c.frame.type,(unsigned long long)monotonic_ns());
             }
         }
@@ -112,26 +116,17 @@ void driver_run(Shared *s,int n,int wake,const Config *cfg) {
                     Frame frame;
                     if(!parser_byte(&parser,bytes[i],&frame))continue;
                     if(frame.type==ACK && frame.length==2 && active && frame.data[0]==pending.frame.type) {
+                        if(pending.frame.type==STOP && frame.data[1]==RT_OK) {
+                            Record stop={.kind=R_STOP,.node=n};
+                            emit(s,&stop);
+                        }
                         reply(s,n,frame.data[1]?REPLY_REJECT:REPLY_OK,&frame);
                         active=false;
                     } else if(frame.type==CAL_RESP && frame.length==4 && active && pending.frame.type==CAL_REQ) {
                         reply(s,n,get32(frame.data)?REPLY_OK:REPLY_REJECT,&frame);
                         active=false;
-                    } else if(frame.type==TICK && frame.length==4) {
-                        Record r= {
-                            .kind=R_TICK,.node=n,.tick=get32(frame.data)
-                        };
-                        if(sem_wait_ms(&s->lock,20)==0) {
-                            s->last_tick_ns[n]=monotonic_ns();
-                            s->last_tick[n]=r.tick;
-                            sem_post(&s->lock);
-                        }
-                        emit(s,&r);
-                    } else if(frame.type==EVENT && frame.length==13 && frame.data[4]>=1 && frame.data[4]<=8) {
-                        Record r= {
-                            .kind=R_NODE,.node=n,.tick=get32(frame.data),.code=frame.data[4],.id=get32(frame.data+5),.value=get32(frame.data+9)
-                        };
-                        emit(s,&r);
+                    } else if(receive_telemetry(s,n,&frame)) {
+                        /* También se procesa mientras se espera un ACK. */
                     } else note(s,n,"trama inesperada o carga inválida tipo=%u len=%u",frame.type,frame.length);
                 }
             } else if(got==0 || (errno!=EAGAIN && errno!=EINTR)) {

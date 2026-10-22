@@ -19,11 +19,13 @@ son 115200, 8N1, sin control de flujo, abiertos exclusivamente por su controlado
 El usuario debe tener acceso a los dispositivos seriales. No ejecutar dos hosts
 sobre los mismos puertos.
 
-**El firmware actual aún no permite una ejecución física completa.** El ESP32
-responde calibración y despliegue; todavía debe implementar el resto del contrato.
-La Pico tiene codecs/cola, pero su `main.cpp` solo hace blink. El host excluye un
-nodo que no confirma CONFIGURE; el motivo queda en el reporte.
-[Contrato e integración pendiente](docs/PROTOCOL.md).
+El host y ambos firmwares comparten el protocolo de
+[`common/rt_protocol.h`](../common/rt_protocol.h). START lleva algoritmo y período
+de reporte; ADD_TASK permite inserción y reubicación sin reiniciar los nodos.
+Ver el [contrato serial](docs/PROTOCOL.md) y la
+[guía para placas reales](docs/HARDWARE_TEST.md). Las pruebas locales usan los
+codecs originales y las fuentes Pico con adaptadores Linux; no sustituyen una
+validación física ni una compilación con los SDK.
 
 ## Configuración
 
@@ -33,7 +35,7 @@ nodo que no confirma CONFIGURE; el motivo queda en el reporte.
 | `heuristic` | `First-Fit` (default) o `Worst-Fit` |
 | `tick_us` | 10000; rango 1000–1000000 µs, coincide con calibración ESP32 |
 | `esp_port`, `pico_port` | Rutas distintas, obligatorias |
-| `report_ticks` | 10; entero positivo |
+| `report_ticks` | 10; rango 1–65535 |
 | `missed_reports` | 3; entero positivo |
 | `timeout_ms` | 2000; rango 100–60000 ms por intercambio serial |
 | `tasks` | Archivo CSV obligatorio |
@@ -42,8 +44,9 @@ nodo que no confirma CONFIGURE; el motivo queda en el reporte.
 Claves desconocidas, repetidas, valores incompletos, NUL y líneas excesivas se
 rechazan. La ventana de vigilancia `tick_us * report_ticks * missed_reports` no
 puede exceder 24 h. Conviene usar una ventana mayor que el jitter USB esperado.
-El ESP32 mide 50 ticks al calibrar: para ticks grandes, aumentar `timeout_ms`
-por encima de esa ventana más el transporte. No se fijan velocidades reales.
+Ambos nodos miden 50 ticks al calibrar. El host ajusta automáticamente la espera
+de calibración a esa ventana más 1 s; STOP/ADD_TASK admiten al menos un tick
+más 1 s. `timeout_ms` puede ampliar esas esperas. No se fijan velocidades reales.
 
 ## Tareas y comandos
 
@@ -57,7 +60,7 @@ id,tipo,W,T,D,criticidad
 4,S,10,50,15,9
 ```
 
-`id` usa 1..4294967294 (0 y UINT32_MAX reservados), `W/T/D` son uint32 positivos,
+`id` usa 1..65535 (0 reservado para CPU ociosa en la trama), `W/T/D` son uint32 positivos,
 criticidad es int32 con signo y `tipo` es `P` o `S`. Se conservan plazos menores,
 iguales o mayores que T. Hay como máximo 512 IDs por sesión, incluidos rechazados;
 no se reutilizan IDs. Como máximo ocho tareas desplegadas por nodo y una
@@ -122,11 +125,11 @@ y munmap en las salidas controladas.
 | `src/config.c`, `src/tasks.c` | Entradas acotadas y validación completa |
 | `src/scheduler.c` | Costos, admisión, orden, First-Fit, Worst-Fit y plan de migración |
 | `src/ipc.c` | shm_open/mmap, colas y semáforos compartidos |
-| `src/protocol.c`, `src/serial.c` | Tramas/CRC/parser y transporte serial |
+| `src/protocol.c`, `src/telemetry.c`, `src/serial.c` | Tramas/CRC/parser, cargas y transporte serial |
 | `src/driver.c` | Proceso dueño de un puerto, transacciones y recepción de telemetría |
 | `src/report.c` | Proceso consumidor, CSV y HTML/SVG |
 | `include/host.h` | Estructuras e interfaces, sin punteros privados en memoria compartida |
-| `tests/` | Pruebas de C, codecs originales y emulador PTY separado |
+| `tests/` | Pruebas de C, codecs originales y firmware Pico nativo sobre PTY |
 | `examples/` | Configuración y cargas de experimentos |
 
 Se crean cuatro procesos reales con fork: coordinador, dos controladores y
@@ -203,17 +206,19 @@ localmente. El reporte solo consume la cola compartida, nunca el serial.
 inciertos, errores, fallas, calibraciones, solicitudes y todos los eventos reales.
 `tasks.csv` separa tiempo hasta primera ejecución y hasta finalización; conserva
 período, plazo, costo, criticidad, releases, misses y esporádicas ignoradas.
-`gantt.csv` y SVG solo contienen intervalos RUN observados. No se rellenan huecos
-con simulación. Sin datos se escribe «sin datos», no utilización cero medida.
+`gantt.csv` y SVG reconstruyen intervalos mediante SWITCH, RELEASE, COMPLETE y
+MISS. No se dibuja ejecución en ticks perdidos ni se inventan eventos. Sin datos
+se escribe «sin datos», no utilización cero medida.
 
 La utilización teórica es suma C/T de despliegues confirmados; cada confirmación
-y retiro está registrado. La medida es ticks RUN observados / horizonte de ticks
+y retiro está registrado. La medida es ticks reconstruidos / horizonte de ticks
 observado desde START (cada nodo por separado). Con pérdidas es parcial, no una
 estimación reconstruida. Se cuentan entradas/cambios de tarea, incluida entrada
-desde idle/huecos. Los eventos FrameError/EventsLost marcan la traza incompleta.
-Las medias de latencia solo usan pares correlacionables; releases solapados de
-un mismo ID no se interpretan como trabajos distintos sin un identificador de
-trabajo en el protocolo. Ver precisiones en docs/PROTOCOL.md.
+desde idle/huecos. TICK_LOST, tramas corruptas y contadores de pérdidas marcan
+la traza incompleta.
+Las medias de latencia solo usan pares correlacionables; el número de
+trabajo de 16 bits correlaciona liberaciones y finalizaciones de cada ID.
+Ver precisiones en docs/PROTOCOL.md.
 
 START se encola para ambos drivers antes de esperar ACK. Se registra para cada
 nodo el intervalo entre encolado en host y recepción de ACK. Suponiendo ACK después
@@ -226,30 +231,16 @@ artificialmente las dos trazas. Hay que validar esa cota con hardware/analizador
 
 ```sh
 make test
-# En este entorno LeakSanitizer no funciona bajo ptrace:
 ASAN_OPTIONS=detect_leaks=0 make sanitize
-# Regresar al binario normal después de sanitizer:
 make clean
 make
-# Integridad UT, desde host/:
-sha256sum -c docs/UT_SHA256SUMS
 ```
 
-Ver [pruebas y experimentos](docs/TESTING.md). Las velocidades sintéticas nunca
-entran al ejecutable de producción. El emulador solo existe en `tests/`.
+Ver [cobertura y límites de las pruebas](docs/TESTING.md). La suite incluye
+interoperabilidad con los codecs originales, pruebas de ambos calendarizadores
+y sesiones completas del host sobre PTY con el código Pico compilado para Linux.
+No se introducen velocidades de prueba en el ejecutable de producción.
 
-Para una sesión manual simulada:
-
-```sh
-python3 tests/emulator.py --speeds 10 5
-# En otra terminal: copiar examples/host.ini a build/pty.ini,
-# sustituir esp_port/pico_port por los PTY impresos y ejecutar:
-./build/host build/pty.ini
-```
-
-Pendientes físicos: completar ambos firmwares, compilar/cargar con sus SDK,
-calibrar en cada ejecución, observar LEDs/botones/debounce, pérdidas de plazos,
-USB bajo carga, autonomía sin host y desfase real. PlatformIO no está instalado
-en este entorno y no se hicieron cargas ni compilaciones de firmware completo.
-El documento de atributo TE requiere respuestas reales del equipo; este host
-no inventa participación ni resultados de experimentos físicos.
+Queda comprobar con placas reales la compilación/carga con sus SDK, botones,
+LEDs, autonomía con alimentación independiente, carga USB y desfase físico.
+El documento de atributo TE requiere las respuestas y evidencias del equipo.

@@ -65,7 +65,10 @@ bool config_load(const char *path,Config *c,char *err,size_t n) {
             else if(k==2) {
                 c->tick_us=x;
                 if(x<1000 || x>1000000) ok=false;
-            } else if(k==5) c->report_ticks=x;
+            } else if(k==5) {
+                c->report_ticks=x;
+                if(x>UINT16_MAX)ok=false;
+            }
             else if(k==6) c->missed_reports=x;
             else {
                 c->timeout_ms=x;

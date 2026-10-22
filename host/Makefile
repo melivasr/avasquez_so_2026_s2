@@ -4,26 +4,51 @@ CPPFLAGS += -D_GNU_SOURCE -Iinclude
 CFLAGS ?= -std=c11 -O2 -g
 CFLAGS += -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes
 LDLIBS += -lm -pthread -lrt
-CORE = src/tasks.c src/config.c src/scheduler.c src/protocol.c src/ipc.c
+CORE = src/tasks.c src/config.c src/scheduler.c src/protocol.c src/ipc.c src/telemetry.c
 SOURCES = $(CORE) src/serial.c src/driver.c src/report.c src/main.c
+WIRE = ../common/rt_protocol.h
+ESP = ../nodo1ESP/ESP_RT_Timer
+PICO = ../node2
+PICO_SRC = $(wildcard $(PICO)/src/*.cpp) $(wildcard $(PICO)/src/scheduler/*.cpp)
+ESP_TESTS = $(addprefix build/esp_,sched_core_test task_parser_test event_queue_test tick_report_test)
 .PHONY: all test clean sanitize
 all: build/host
 build:
 	mkdir -p build
-build/host: $(SOURCES) include/host.h | build
+build/host: $(SOURCES) include/host.h $(WIRE) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
-build/test_core: tests/test_core.c $(CORE) include/host.h | build
+build/test_core: tests/test_core.c $(CORE) include/host.h $(WIRE) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_core.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
-build/protocol.o: src/protocol.c include/host.h | build
+build/test_report: tests/test_report.c src/report.c $(CORE) include/host.h $(WIRE) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) tests/test_report.c src/report.c $(CORE) $(LDFLAGS) $(LDLIBS) -o $@
+build/protocol.o: src/protocol.c include/host.h $(WIRE) | build
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
-build/interop_esp: tests/test_interop.cpp build/protocol.o ../nodo1ESP/ESP_RT_Timer/src/protocol.cpp ../nodo1ESP/ESP_RT_Timer/src/protocol.h
-	$(CXX) $(CPPFLAGS) -std=c++11 -Wall -Wextra $< ../nodo1ESP/ESP_RT_Timer/src/protocol.cpp build/protocol.o $(LDFLAGS) -o $@
-build/interop_pico: tests/test_interop.cpp build/protocol.o ../node2/src/protocol.cpp ../node2/src/crc16.cpp ../node2/include/protocol.h ../node2/include/crc16.h
-	$(CXX) $(CPPFLAGS) -I../node2/include -DTEST_PICO -std=c++11 -Wall -Wextra $< ../node2/src/protocol.cpp ../node2/src/crc16.cpp build/protocol.o $(LDFLAGS) -o $@
-test: build/host build/test_core build/interop_esp build/interop_pico
+build/ipc.o: src/ipc.c include/host.h $(WIRE) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+build/telemetry.o: src/telemetry.c include/host.h $(WIRE) | build
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+INTEROP_CORE = build/protocol.o build/ipc.o build/telemetry.o
+ESP_WIRE = $(addprefix $(ESP)/src/,protocol.cpp event_queue.cpp tick_report.cpp)
+PICO_WIRE = $(addprefix $(PICO)/src/,protocol.cpp crc16.cpp event_queue.cpp messages.cpp)
+build/interop_esp: tests/test_interop.cpp $(INTEROP_CORE) $(ESP_WIRE) $(wildcard $(ESP)/src/lib/*.h) $(WIRE)
+	$(CXX) $(CPPFLAGS) -I$(ESP)/src -std=c++17 -Wall -Wextra $< $(ESP_WIRE) $(INTEROP_CORE) $(LDFLAGS) $(LDLIBS) -o $@
+build/interop_pico: tests/test_interop.cpp $(INTEROP_CORE) $(PICO_WIRE) $(wildcard $(PICO)/include/*.h) $(WIRE)
+	$(CXX) $(CPPFLAGS) -I$(PICO)/include -DTEST_PICO -std=c++17 -Wall -Wextra $< $(PICO_WIRE) $(INTEROP_CORE) $(LDFLAGS) $(LDLIBS) -o $@
+build/esp_%_test: $(ESP)/host_tests/%_test.cpp $(ESP)/src/%.cpp $(wildcard $(ESP)/src/lib/*.h) $(WIRE) | build
+	$(CXX) -I$(ESP)/src -std=c++17 -Wall -Wextra $< $(ESP)/src/$*.cpp $(LDFLAGS) -o $@
+build/test_pico: tests/test_pico.cpp $(PICO)/src/task_parser.cpp $(wildcard $(PICO)/src/scheduler/*.cpp) $(wildcard $(PICO)/include/*.h) $(wildcard $(PICO)/include/scheduler/*.h) $(WIRE) | build
+	$(CXX) -I$(PICO)/include -std=c++17 -Wall -Wextra tests/test_pico.cpp $(PICO)/src/task_parser.cpp $(wildcard $(PICO)/src/scheduler/*.cpp) $(LDFLAGS) -o $@
+build/pico_ut.o: $(PICO)/src/ut.c $(PICO)/include/ut.h | build
+	$(CC) -I$(PICO)/include $(CFLAGS) -c $< -o $@
+build/native_pico: tests/native_pico.cpp tests/native/Arduino.h tests/native/pico/time.h $(PICO_SRC) $(wildcard $(PICO)/include/*.h) $(wildcard $(PICO)/include/scheduler/*.h) build/pico_ut.o $(WIRE) | build
+	$(CXX) -Itests/native -I$(PICO)/include -std=c++17 -O2 -Wall -Wextra tests/native_pico.cpp $(PICO_SRC) build/pico_ut.o $(LDFLAGS) -o $@
+test: build/host build/test_core build/test_report build/interop_esp build/interop_pico build/test_pico $(ESP_TESTS) build/native_pico
 	./build/test_core
+	./build/test_report
 	./build/interop_esp
 	./build/interop_pico
+	./build/test_pico
+	@for test in $(ESP_TESTS); do $$test || exit 1; done
 	python3 tests/integration.py
 sanitize:
 	$(MAKE) clean

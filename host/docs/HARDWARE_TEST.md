@@ -3,10 +3,10 @@
 El flujo es: **configurar → arrancar el host → calibrar → repartir tareas →
 iniciar nodos → probar comandos → cerrar y revisar el reporte**.
 
-Con los firmwares revisados, el arranque todavía se detiene en `CONFIGURE`,
-porque ambos nodos lo rechazan. Los pasos siguientes describen cómo debe
-funcionar cuando se complete esa integración. Esta guía no confirma una
-validación física del sistema.
+El host y los dos firmwares usan ahora el [protocolo compartido](PROTOCOL.md).
+Carga las versiones actualizadas de ambos nodos antes de probar: se añadió
+ADD_TASK a Pico, criticidad int32 y DEPLOY vacío para limpiar tablas conservadas.
+Las pruebas locales no confirman funcionamiento físico.
 
 ## 1. Conectar las placas y configurar los puertos
 
@@ -50,7 +50,7 @@ donde se ejecuta el host; los pasos siguientes lo ejecutan desde `host/`.
 ## 2. Arrancar el host
 
 ```bash
-cd /home/jian/Desktop/avasquez_so_2026_s2/host
+cd host
 make
 ./build/host examples/host.ini
 ```
@@ -64,10 +64,9 @@ El host realiza estos pasos sin que tengas que enviar mensajes manualmente:
    y reporte.
 3. Envía la duración del tick y solicita calibración a ambos nodos.
 4. Recibe sus velocidades reales, expresadas en UT por tick.
-5. Envía la configuración del algoritmo y del reporte de tick.
-6. Calcula costos, comprueba admisión y asigna tareas.
-7. Envía las tareas y espera sus ACK.
-8. Envía `START`, que establece el tick cero de cada nodo.
+5. Calcula costos, comprueba admisión y asigna tareas.
+6. Envía DEPLOY a ambos nodos (vacío si no hay tareas) y espera sus ACK.
+7. Envía START con algoritmo y período de reporte, estableciendo tick cero.
 
 En pantalla debes ver las calibraciones y las tareas **desplegadas y
 confirmadas**. Una tarea solamente **admitida** todavía está pendiente de
@@ -174,20 +173,18 @@ La carpeta `report/` contiene:
 - `gantt.csv`: intervalos de ejecución observados.
 - `tasks.csv`: estadísticas y latencias por tarea.
 
-El Gantt requiere eventos RUN reales del firmware. Los intervalos faltantes no
+El Gantt se reconstruye de SWITCH, RELEASE, COMPLETE y MISS del firmware. Los intervalos faltantes no
 se rellenan mediante una simulación del host.
 
-## Integración pendiente para completar la prueba física
+## Comprobaciones físicas restantes
 
-- Implementar `CONFIGURE` en ambos nodos, según el contrato del host.
-- Completar las operaciones faltantes del ESP32, incluyendo START, STOP y
-  telemetría.
-- Acordar el reporte de tick: la Pico envía 9 bytes cada 100 ticks y el host
-  espera 4 bytes con periodo configurable.
-- Permitir START y reportes de tick en un nodo sin tareas asignadas.
-- Completar la ejecución local, los eventos de tareas, las solicitudes
-  esporádicas y ADD_TASK para inserción y reubicación.
-- Validar calibración, botones, plazos, autonomía y desfase con hardware real.
+- Iniciar con los nodos detenidos o recién reiniciados; una sesión autónoma
+  anterior rechaza calibración hasta recibir STOP voluntario o reset físico.
+- Verificar RMS y EDF, ocho tareas por nodo y una esporádica por nodo.
+- Comprobar botones, debounce, LEDs, calibración y margen con tráfico USB.
+- Comprobar inserción y migración sin reinicio del sobreviviente.
+- Alimentar aparte el nodo si se desconecta USB para probar autonomía.
+- Medir desfase real y comparar con la cota de envío/ACK que registra el host.
 
-El contrato de mensajes del host está en [PROTOCOL.md](PROTOCOL.md).
-Las pruebas automatizadas están descritas en [TESTING.md](TESTING.md).
+El [contrato de mensajes](PROTOCOL.md) y las [pruebas locales](TESTING.md)
+describen los formatos y los límites de lo validado sin placas.
