@@ -1,5 +1,5 @@
 
-#include "task_parser.h"
+#include "lib/task_parser.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +31,27 @@ static bool parse_uint(const char *text, uint32_t *out)
     return true;
 }
 
+// Divide 'buffer' (modificable) en exactamente 6 campos separados por ','.
+// A diferencia de strtok, no colapsa comas: un campo vacío falla en parse_uint
+// o en la comparación del tipo, y una coma de más falla aquí.
+static bool split_fields(char *buffer, char *fields[6])
+{
+    char *p = buffer;
+    for (int i = 0; i < 6; ++i) {
+        fields[i] = p;
+        char *comma = strchr(p, ',');
+        if (i == 5) {
+            return comma == nullptr; // el último campo no admite más comas
+        }
+        if (comma == nullptr) {
+            return false;            // faltan campos
+        }
+        *comma = '\0';
+        p = comma + 1;
+    }
+    return true;
+}
+
 bool parse_task_line(const char *line, Task *out)
 {
     if (line == nullptr || out == nullptr) {
@@ -47,20 +68,7 @@ bool parse_task_line(const char *line, Task *out)
     memcpy(buffer, line, len + 1);
 
     char *fields[6];
-    char *saveptr = nullptr;
-    char *token = strtok_r(buffer, ",", &saveptr);
-
-    for (int i = 0; i < 6; ++i) {
-        if (token == nullptr) {
-            return false;
-        }
-
-        fields[i] = token;
-        token = strtok_r(nullptr, ",", &saveptr);
-    }
-
-    // Rechazar campos adicionales.
-    if (token != nullptr) {
+    if (!split_fields(buffer, fields)) {
         return false;
     }
 
@@ -95,37 +103,5 @@ bool parse_task_line(const char *line, Task *out)
     candidate.job_active = false;
 
     *out = candidate;
-    return true;
-}
-
-bool load_local_tasks(Task tasks[], size_t capacity, size_t *count)
-{
-    if (tasks == nullptr || count == nullptr || capacity == 0) {
-        return false;
-    }
-
-    static const char *lines[] = {
-        "3,P,40,20,20,2",
-        "4,P,10,10,8,1",
-        "5,S,6,15,10,3"
-    };
-
-    *count = 0;
-
-    for (const char *line : lines) {
-        if (*count >= capacity) {
-            return false;
-        }
-
-        Task candidate = {};
-
-        if (!parse_task_line(line, &candidate)) {
-            return false;
-        }
-
-        tasks[*count] = candidate;
-        ++(*count);
-    }
-
     return true;
 }

@@ -26,7 +26,8 @@ enum class MessageType : uint8_t {
     TickReport = 0x06,
     SporadicRelease = 0x07, // Disparo de tarea S
     Stop = 0x08,
-    Ack = 0x09 // Acuse de recibo Acknowledge
+    Ack = 0x09, // Acuse de recibo Acknowledge
+    AddTask = 0x0A // Modo manual: agrega una tarea
 };
 
 // Trama compuesta por tipo de mensaje, tamaño y carga útil
