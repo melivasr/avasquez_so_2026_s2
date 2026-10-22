@@ -1,15 +1,29 @@
+// NODO 2 - RASPBERRY PI PICO H
+// Atiende el tick del timer,
+// las tramas que llegaron por USB y envía los eventos pendientes.
+
 #include <Arduino.h>
 
-// the setup routine runs once when you press reset:
-void setup() {
-  // initialize the digital pin as an output.
-  pinMode(LED_BUILTIN, OUTPUT);
+#include "node.h"
+#include "usb_communication.h"
+
+static Frame received;
+
+void setup(){
+    Serial.begin(115200);
+    node_setup();
 }
 
-// the loop routine runs over and over again forever:
-void loop() {
-  digitalWrite(LED_BUILTIN, HIGH);   // turn the LED on (HIGH is the voltage level)
-  delay(1000);               // wait for a second
-  digitalWrite(LED_BUILTIN, LOW);    // turn the LED off by making the voltage LOW
-  delay(1000);               // wait for a second
+void loop(){
+    // Procesar el tick nuevo que marcó el timer (si se atrasó, se salta
+    // al tick actual y los que faltaron se cuentan como perdidos)
+    node_tick();
+
+    // Atender las tramas que ya llegaron
+    while (usb_receive(&received)) {
+        node_handle_frame(&received);
+    }
+
+    // Enviar los eventos pendientes 
+    usb_send_events();
 }

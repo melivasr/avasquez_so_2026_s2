@@ -11,7 +11,7 @@
 #define FRAME_MIN_SIZE 7U                               // inicio(2) + tipo(1) + largo(2) + CRC(2)
 #define FRAME_MAX_SIZE (FRAME_MIN_SIZE + MAX_PAYLOAD)
 
-// Mismos codigos que el nodo ESP32
+// Tipos de mensaje
 enum class MessageType : uint8_t {
     CalibrateReq = 0x01,
     CalibrateResp = 0x02,

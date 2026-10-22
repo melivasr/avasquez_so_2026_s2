@@ -3,7 +3,9 @@
 
 
 FrameReceiver::FrameReceiver(){
-    errors_ = 0;
+    valid_frames_ = 0;
+    crc_errors_ = 0;
+    length_errors_ = 0;
     reset();
 }
 
@@ -16,8 +18,16 @@ bool FrameReceiver::in_progress() const{
     return count_ > 0;
 }
 
-uint32_t FrameReceiver::errors() const{
-    return errors_;
+uint32_t FrameReceiver::valid_frames() const{
+    return valid_frames_;
+}
+
+uint32_t FrameReceiver::crc_errors() const{
+    return crc_errors_;
+}
+
+uint32_t FrameReceiver::length_errors() const{
+    return length_errors_;
 }
 
 bool FrameReceiver::push(uint8_t byte, Frame *frame){
@@ -53,7 +63,7 @@ bool FrameReceiver::push(uint8_t byte, Frame *frame){
 
         // largo inválido: se descarta antes de seguir guardando
         if (length > MAX_PAYLOAD) {
-            errors_++;
+            length_errors_++;
             reset();
             return false;
         }
@@ -69,8 +79,10 @@ bool FrameReceiver::push(uint8_t byte, Frame *frame){
     // Trama completa: decode_frame valida el CRC
     bool valid = decode_frame(buffer_, count_, frame);
 
-    if (!valid) {
-        errors_++;
+    if (valid) {
+        valid_frames_++;
+    } else {
+        crc_errors_++;
     }
 
     // Lista para la siguiente trama

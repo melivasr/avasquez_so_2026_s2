@@ -22,12 +22,17 @@ public:
     // Hay una trama a medio recibir
     bool in_progress() const;
 
-    // Tramas descartadas por largo mayor a 512 o CRC malo
-    uint32_t errors() const;
+    // Contadores: tramas válidas, descartadas por CRC malo
+    // y descartadas por largo mayor a 512
+    uint32_t valid_frames() const;
+    uint32_t crc_errors() const;
+    uint32_t length_errors() const;
 
 private:
     uint8_t buffer_[FRAME_MAX_SIZE];
     size_t count_; // bytes guardados de la trama actual
     size_t expected_; // tamaño total esperado (se sabe al leer el largo)
-    uint32_t errors_;
+    uint32_t valid_frames_;
+    uint32_t crc_errors_;
+    uint32_t length_errors_;
 };
