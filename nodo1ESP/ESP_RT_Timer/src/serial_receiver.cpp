@@ -88,6 +88,11 @@ static bool process_deploy(const Frame &frame)
         return false;
     }
 
+    // Un NUL embebido truncaría la línea sin error; se rechaza la carga completa.
+    if (memchr(frame.payload, '\0', frame.length) != nullptr) {
+        return false;
+    }
+
     size_t count = 0;
     size_t start = 0;
 

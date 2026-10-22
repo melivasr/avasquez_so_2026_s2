@@ -44,6 +44,18 @@ static constexpr BaseType_t SCHED_TASK_CORE = 1;
 static constexpr uint32_t TICK_US_MIN = 1000;
 static constexpr uint32_t TICK_US_MAX = 1000000;
 
+#ifdef RT_FAULT_INJECT
+// SOLO PARA LA PRUEBA R2 (entorno esp32dev_fault; nunca se entrega así).
+// Tras procesar el tick indicado se bloquea la tarea calendarizadora durante N,05
+// ticks para que la ISR cuente ticks que no se atienden (TICK_LOST). El ,05 deja
+// margen para que la cantidad de ticks perdidos sea determinista.
+#include "esp_rom_sys.h"
+static constexpr uint32_t FAULT_STALL_1_TICK = 150;
+static constexpr uint32_t FAULT_STALL_1_CENTI = 305;   // 3,05 ticks -> se pierden 2
+static constexpr uint32_t FAULT_STALL_2_TICK = 580;
+static constexpr uint32_t FAULT_STALL_2_CENTI = 4005;  // 40,05 ticks -> se pierden 39
+#endif
+
 // Bits de notificación a la tarea calendarizadora.
 static constexpr uint32_t NOTIFY_TICK = 1U << 0; // desde la ISR
 static constexpr uint32_t NOTIFY_CMD = 1U << 1;  // desde la tarea UART
@@ -480,6 +492,15 @@ static void handle_tick()
 
     post_report_if_due(tick);
     event_tx_kick();
+    #ifdef RT_FAULT_INJECT
+        // Espera activa a propósito, solo en esta prueba (no existe en producción).
+        if (tick == FAULT_STALL_1_TICK || tick == FAULT_STALL_2_TICK) {
+            const uint32_t centi = (tick == FAULT_STALL_1_TICK) ? FAULT_STALL_1_CENTI
+                                                                : FAULT_STALL_2_CENTI;
+            esp_rom_delay_us(static_cast<uint32_t>(
+                static_cast<uint64_t>(g_tick_us) * centi / 100));
+        }
+    #endif
 }
 
 static void worker_task(void *arg)
