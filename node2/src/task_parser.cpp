@@ -34,7 +34,24 @@ static bool parse_number(const char *text, uint32_t *value){
     return true;
 }
 
+static bool parse_criticality(const char *text, int32_t *value){
+    const char *digits = text;
+    if (*digits == '-') ++digits;
+    if (*digits == '\0') return false;
+    for (const char *p = digits; *p; ++p) {
+        if (!isdigit((unsigned char)*p)) return false;
+    }
+    errno = 0;
+    const long long number = strtoll(text, nullptr, 10);
+    if (errno != 0 || number < INT32_MIN || number > INT32_MAX) return false;
+    *value = (int32_t)number;
+    return true;
+}
+
 bool parse_task_line(const char *line, size_t length, Task *task){
+    if (line == nullptr || task == nullptr || memchr(line, '\0', length)) {
+        return false;
+    }
     if (length > 0 &&
         line[length - 1] == '\r') {
         length--;
@@ -92,7 +109,7 @@ bool parse_task_line(const char *line, size_t length, Task *task){
         !parse_number(fields[2], &candidate.W) ||
         !parse_number(fields[3], &candidate.T) ||
         !parse_number(fields[4], &candidate.D) ||
-        !parse_number(fields[5], &candidate.criticality)) {
+        !parse_criticality(fields[5], &candidate.criticality)) {
         return false;
     }
 

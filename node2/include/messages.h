@@ -10,10 +10,10 @@
 #define CALIBRATE_REQ_SIZE 4U // tick_us
 #define CALIBRATE_RESP_SIZE 4U // ut_per_tick 
 #define ACK_SIZE 2U // tipo confirmado + status
-#define TICK_REPORT_SIZE 22U // tick + 5 contadores de 2 bytes + 2 tiempos de 4 bytes
-#define EVENT_RECORD_SIZE 9U // tipo + tick + id + arg
-#define EVENT_MAX_PER_FRAME 56U // 1 + 56 * 9 = 505 bytes, cabe en 512
-#define START_SIZE 3U // algoritmo + report_ticks
+#define TICK_REPORT_SIZE RT_TICK_REPORT_SIZE // tick + 5 contadores de 2 bytes + 2 tiempos de 4 bytes
+#define EVENT_RECORD_SIZE RT_EVENT_RECORD_SIZE // tipo + tick + id + arg
+#define EVENT_MAX_PER_FRAME RT_EVENT_MAX_BATCH // 1 + 56 * 9 = 505 bytes, cabe en 512
+#define START_SIZE RT_START_SIZE // algoritmo + report_ticks
 
 // Códigos de estado del ACK 
 enum class StatusCode : uint8_t {
@@ -35,8 +35,8 @@ enum class NodeState : uint8_t {
 
 // Algoritmo de calendarización 
 enum class Algorithm : uint8_t {
-    RMS = 0,
-    EDF = 1,
+    RMS = RT_RMS,
+    EDF = RT_EDF,
 };
 
 // Lee un START: algoritmo y cada cuántos ticks se manda TICK_REPORT

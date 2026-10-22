@@ -20,7 +20,7 @@ void loop(){
     node_tick();
 
     // Atender las tramas que ya llegaron
-    while (usb_receive(&received)) {
+    if (usb_receive(&received)) {
         node_handle_frame(&received);
     }
 

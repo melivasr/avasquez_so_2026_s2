@@ -84,7 +84,7 @@ static bool send_ack(MessageType original_type, uint8_t status)
 
 static bool process_deploy(const Frame &frame)
 {
-    if (frame.type != MessageType::DeployTasks || frame.length == 0) {
+    if (frame.type != MessageType::DeployTasks) {
         return false;
     }
 
@@ -143,7 +143,7 @@ static bool process_deploy(const Frame &frame)
         start = i + 1;
     }
 
-    if (count == 0) {
+    if (count == 0 && frame.length != 0) {
         return false;
     }
 

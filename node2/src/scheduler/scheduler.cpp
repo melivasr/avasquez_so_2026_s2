@@ -1,5 +1,5 @@
 // CALENDARIZADOR 
-// Por ahora solo tareas periódicas. 
+// Tareas periódicas y esporádicas; apropiación a nivel de tick.
 
 #include "scheduler/scheduler.h"
 
@@ -55,6 +55,25 @@ bool Scheduler::configure(const Task *tasks, size_t count, uint32_t ut_per_tick)
     // las pulsaciones anteriores a START no cuentan
     pending_presses_ = 0;
     sporadic_ignored_ = 0;
+    return true;
+}
+
+bool Scheduler::add_task(const Task &task, uint32_t first_tick){
+    if (count_ >= MAX_TASKS || ut_per_tick_ == 0 || task.id == 0 ||
+        task.id > RT_MAX_TASK_ID || task.W == 0 || task.T == 0 || task.D == 0 ||
+        (task.type != TaskType::Periodic && task.type != TaskType::Sporadic)) {
+        return false;
+    }
+    for (size_t i = 0; i < count_; ++i) {
+        if (states_[i].task.id == task.id ||
+            (task.type == TaskType::Sporadic && states_[i].task.type == TaskType::Sporadic)) {
+            return false;
+        }
+    }
+    TaskState &state = states_[count_++];
+    state = TaskState{};
+    state.task = task;
+    state.next_release = first_tick;
     return true;
 }
 

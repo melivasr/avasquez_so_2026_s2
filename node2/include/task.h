@@ -18,5 +18,5 @@ struct Task {
     uint32_t W; // trabajo requerido en UT
     uint32_t T; // período (P) o intervalo mínimo (S), en ticks
     uint32_t D; // plazo relativo, en ticks
-    uint32_t criticality; // mayor = más crítica
+    int32_t criticality; // mayor = más crítica
 };

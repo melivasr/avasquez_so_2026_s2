@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../common/rt_protocol.h"
 
 #define EVENT_QUEUE_CAPACITY 256U // registros 
 
@@ -10,14 +11,14 @@
 
 // Tipos de evento 
 enum class EventType : uint8_t {
-    Release = 0x01,  // se liberó un trabajo; arg = número de trabajo
-    Switch = 0x02,   // cambió la tarea en ejecución; arg = la anterior
-    Complete = 0x03, // terminó un trabajo; arg = número de trabajo
-    Miss = 0x04,  // plazo vencido, trabajo abortado; arg = número de trabajo
-    SporadicIgnored = 0x05, // pulsación antes del intervalo mínimo
-    TaskAdded = 0x06,  // reservado 
-    TickLost = 0x07,  // ticks no procesados; arg = cuántos
-    BadFrame = 0x08,  // reservado (las tramas malas van en TICK_REPORT)
+    Release = RT_RELEASE,  // se liberó un trabajo; arg = número de trabajo
+    Switch = RT_SWITCH,   // cambió la tarea en ejecución; arg = la anterior
+    Complete = RT_COMPLETE, // terminó un trabajo; arg = número de trabajo
+    Miss = RT_MISS,  // plazo vencido, trabajo abortado; arg = número de trabajo
+    SporadicIgnored = RT_SPORADIC_IGNORED, // pulsación antes del intervalo mínimo
+    TaskAdded = RT_TASK_ADDED,  // arg = ranura 1..8
+    TickLost = RT_TICK_LOST,  // ticks no procesados; arg = cuántos
+    BadFrame = RT_BAD_FRAME,  // reservado (las tramas malas van en TICK_REPORT)
 };
 
 // Un registro de la trama EVENT

@@ -58,6 +58,9 @@ public:
     // si ut_per_tick es 0 o si alguna tarea tiene T en 0.
     bool configure(const Task *tasks, size_t count, uint32_t ut_per_tick);
 
+    // Agrega sin reiniciar el reloj ni los trabajos existentes.
+    bool add_task(const Task &task, uint32_t first_tick);
+
     // Procesa el tick now (ticks desde START): aborta las tareas que
     // llegaron a su plazo, libera las periódicas que tocan, atiende las
     // pulsaciones de la esporádica, elige la tarea de mayor prioridad y

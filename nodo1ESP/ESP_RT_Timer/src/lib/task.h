@@ -16,7 +16,7 @@ struct Task {
     uint32_t W;           // Trabajo requerido en UT
     uint32_t T;           // Período o intervalo mínimo, en ticks
     uint32_t D;           // Plazo relativo, en ticks
-    uint32_t criticality;
+    int32_t criticality;
 
     // Estado de ejecución local.
     uint32_t remaining;

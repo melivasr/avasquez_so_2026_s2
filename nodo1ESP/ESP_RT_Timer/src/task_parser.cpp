@@ -31,6 +31,21 @@ static bool parse_uint(const char *text, uint32_t *out)
     return true;
 }
 
+static bool parse_criticality(const char *text, int32_t *out)
+{
+    const char *digits = text;
+    if (*digits == '-') ++digits;
+    if (*digits == '\0') return false;
+    for (const char *p = digits; *p; ++p) {
+        if (!isdigit((unsigned char)*p)) return false;
+    }
+    errno = 0;
+    const long long value = strtoll(text, nullptr, 10);
+    if (errno != 0 || value < INT32_MIN || value > INT32_MAX) return false;
+    *out = static_cast<int32_t>(value);
+    return true;
+}
+
 // Divide 'buffer' (modificable) en exactamente 6 campos separados por ','.
 // A diferencia de strtok, no colapsa comas: un campo vacío falla en parse_uint
 // o en la comparación del tipo, y una coma de más falla aquí.
@@ -78,7 +93,7 @@ bool parse_task_line(const char *line, Task *out)
         !parse_uint(fields[2], &candidate.W) ||
         !parse_uint(fields[3], &candidate.T) ||
         !parse_uint(fields[4], &candidate.D) ||
-        !parse_uint(fields[5], &candidate.criticality)) {
+        !parse_criticality(fields[5], &candidate.criticality)) {
         return false;
     }
 

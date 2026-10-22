@@ -118,7 +118,8 @@ static void handle_deploy_tasks(const Frame *frame){
     }
 
     // alguna tarea mal escrita (se puede desplegar antes de calibrar)
-    if (!parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+    if (frame->length != 0 &&
+        !parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -213,6 +214,35 @@ static void report_if_due(uint32_t now){
         build_tick_report(&report, &data);
         usb_post_report(&report);
     }
+}
+
+// ADD_TASK: agrega entre ticks sin reemplazar las tareas anteriores.
+static void handle_add_task(const Frame *frame){
+    size_t length = frame->length;
+    if (length > 0 && frame->payload[length - 1] == '\n') --length;
+    Task task = {};
+    if (task_count >= MAX_TASKS ||
+        !parse_task_line((const char *)frame->payload, length, &task)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+    for (size_t i = 0; i < task_count; ++i) {
+        if (tasks[i].id == task.id ||
+            (task.type == TaskType::Sporadic && tasks[i].type == TaskType::Sporadic)) {
+            send_ack(frame, StatusCode::Error);
+            return;
+        }
+    }
+    if (state == NodeState::Running) {
+        if (!scheduler->add_task(task, tick_count)) {
+            send_ack(frame, StatusCode::Error);
+            return;
+        }
+        usb_add_event(EventType::TaskAdded, tick_count, (uint16_t)task.id,
+                      (uint16_t)(task_count + 1));
+    }
+    tasks[task_count++] = task;
+    send_ack(frame, StatusCode::Ok);
 }
 
 // START: tick 0 y arranca el timer
@@ -351,6 +381,10 @@ void node_handle_frame(const Frame *frame){
     }
     if (frame->type == (uint8_t)MessageType::Start) {
         handle_start(frame);
+        return;
+    }
+    if (frame->type == (uint8_t)MessageType::AddTask) {
+        handle_add_task(frame);
         return;
     }
     if (frame->type == (uint8_t)MessageType::Stop) {

@@ -215,10 +215,9 @@ class Leds:
         return 1 if tick < self.miss_until else 0
 
     def clock(self, tick):
-        """Llegó el TICK_REPORT de este tick: sus eventos ya llegaron y se puede imprimir."""
+        """El heartbeat puede adelantarse a eventos viejos; no rellenar hasta él."""
         if self.tick is not None and self.tick <= tick:
             self.flush()
-        self.fill(tick)
 
     def flush(self):
         if self.tick is None:
@@ -314,14 +313,18 @@ def main():
     # al mandar STOP, los eventos que faltaban llegan antes de su ACK
     node.port.write(frame(STOP))
     end = time.time() + 1.0
+    stop_confirmed = False
     while time.time() < end:
         for f in stream.frames():
             if f["type"] == EVENT:
                 for ev in events(f) or []:
                     leds.add(ev)
             elif f["type"] == ACK and f["payload"][0] == STOP:
+                stop_confirmed = f["payload"][1] == 0
                 end = 0
     leds.flush()
+    if stop_confirmed and last_report:
+        leds.fill(last_report["tick"])
 
     if last_report:
         print(f"\núltimo TICK_REPORT (tick {last_report['tick']}): plazos perdidos={last_report['misses']}"

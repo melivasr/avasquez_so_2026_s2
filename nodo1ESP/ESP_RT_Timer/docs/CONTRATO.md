@@ -1,3 +1,13 @@
+> **Integración actual:** el contrato compartido con host y Pico está en
+> [host/docs/PROTOCOL.md](../../../host/docs/PROTOCOL.md) y sus constantes en
+> [common/rt_protocol.h](../../../common/rt_protocol.h). El código conserva
+> START de 3 bytes, EVENT por lotes, TICK_REPORT de 22 bytes y ADD_TASK=0x0A.
+> Ahora DEPLOY vacío borra la tabla y criticidad acepta int32 con signo.
+> La criticidad se verifica con pruebas locales; DEPLOY vacío en ESP32 requiere
+> comprobación con placa. Estos cambios no forman parte de los resultados por
+> cable históricos de abajo y requieren cargar el firmware actualizado.
+> Las menciones a formatos pendientes reflejan ese historial anterior.
+
 # README_NODO — Nodo ESP32 (contrato serial para el host)
 
 Documento para quienes desarrollan el host. El contrato entre host y nodo es **solo** el protocolo serial descrito aquí; no hace falta conocer el interior del nodo.
