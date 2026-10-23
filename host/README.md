@@ -94,8 +94,11 @@ fail pico
 q
 ```
 
-Los comandos salvo `q` terminan con Enter. En una terminal, `q` al comienzo de
-línea actúa inmediatamente. `add` valida, admite y solicita ADD_TASK; espera ACK,
+Los comandos y el tipo `P`/`S` de `add` aceptan mayúsculas y minúsculas.
+Backspace borra el carácter anterior tanto de la entrada como de la pantalla;
+Ctrl+U borra la línea completa. Los comandos salvo `q` terminan con Enter.
+En una terminal, `q` o `Q` al comienzo de línea actúan inmediatamente.
+`add` valida, admite y solicita ADD_TASK; espera ACK,
 sin detener tareas ni reenviar START. `trigger` es una solicitud diagnóstica de
 liberación esporádica; el nodo conserva la decisión de ignorarla por intervalo
 mínimo. El botón físico, debounce e interrupción siguen perteneciendo al nodo.

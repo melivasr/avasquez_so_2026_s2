@@ -1,4 +1,5 @@
 #include "host.h"
+#include <ctype.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <poll.h>
@@ -221,12 +222,16 @@ static void manual_add(Host *h,const char *line) {
     else deploy_add(h,n,&t,"DESPLEGADA y confirmada sin reiniciar tick");
 }
 
-static void command(Host *h,const char *line) {
-    if(!strcmp(line,"q")) {
+static void command(Host *h,const char *raw_line) {
+    char line[256];
+    size_t length=strlen(raw_line);
+    if(length>=sizeof line)return;
+    for(size_t i=0;i<=length;i++)line[i]=(char)toupper((unsigned char)raw_line[i]);
+    if(!strcmp(line,"Q")) {
         h->quit=true;
         h->stop_nodes=true;
-    } else if(!strncmp(line,"add ",4))manual_add(h,line+4);
-    else if(!strncmp(line,"trigger ",8)) {
+    } else if(!strncmp(line,"ADD ",4))manual_add(h,line+4);
+    else if(!strncmp(line,"TRIGGER ",8)) {
         uint32_t id;
         int node=-1;
         if(parse_u32(line+8,&id))for(int n=0;n<NODES;n++)if(h->nodes[n].operational) for(size_t i=0;i<h->nodes[n].count;i++)if(h->nodes[n].tasks[i].id==id && h->nodes[n].tasks[i].type=='S')node=n;
@@ -240,11 +245,11 @@ static void command(Host *h,const char *line) {
         Record r=transaction(h,node,&f);
         note(h->shared,node,"solicitud esporádica id=%"PRIu32": %s; el nodo decide liberación/intervalo mínimo",id,r.code==REPLY_OK?"confirmada":r.code==REPLY_REJECT?"rechazada":"incierta");
         if(r.code==REPLY_UNCERTAIN || r.code==REPLY_IO)quarantine(h,node);
-    } else if(!strcmp(line,"status")) {
+    } else if(!strcmp(line,"STATUS")) {
         for(int n=0;n<2;n++)printf("%s: %s s=%"PRIu32" tareas=%zu U=%.6Lf\n",n?"Pico":"ESP32",h->nodes[n].operational?"operativo":"caído/no iniciado",h->nodes[n].speed,h->nodes[n].count,node_util(&h->nodes[n]));
         fflush(stdout);
-    } else if(!strcmp(line,"fail esp") || !strcmp(line,"fail pico")) {
-        int n=!strcmp(line,"fail pico");
+    } else if(!strcmp(line,"FAIL ESP") || !strcmp(line,"FAIL PICO")) {
+        int n=!strcmp(line,"FAIL PICO");
         quarantine(h,n);
         Record r= {
             .kind=R_EXIT
@@ -460,10 +465,12 @@ int main(int argc,char **argv) {
     bool terminal=isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO,&saved)==0;
     if(terminal) {
         struct termios t=saved;
-        t.c_lflag&=~(tcflag_t)ICANON;
+        /* En modo no canónico el host edita y dibuja su propia entrada.
+         * El eco del kernel mostraría Backspace como ^? sin borrar la línea. */
+        t.c_lflag&=~(tcflag_t)(ICANON|ECHO|ECHONL);
         t.c_cc[VMIN]=1;
         t.c_cc[VTIME]=0;
-        tcsetattr(STDIN_FILENO,TCSANOW,&t);
+        if(tcsetattr(STDIN_FILENO,TCSANOW,&t)<0)terminal=false;
     }
     printf("Comandos: add id,P|S,W,T,D,criticidad | trigger id | status | fail esp | fail pico | q\n");
     fflush(stdout);
@@ -494,21 +501,36 @@ int main(int argc,char **argv) {
             for(ssize_t i=0;i<got && !h.quit;i++) {
                 unsigned char ch=(unsigned char)bytes[i];
                 if(ch=='\r')continue;
-                if(ch=='q' && used==0 && !discard) {
+                if((ch=='q' || ch=='Q') && used==0 && !discard) {
+                    if(terminal)printf("%c\n",ch);
                     command(&h,"q");
                     break;
                 }
                 if(ch=='\n') {
+                    if(terminal)putchar('\n');
                     if(!discard) {
                         input[used]=0;
                         command(&h,input);
                     } else fprintf(stderr,"Comando demasiado largo/inválido\n");
                     used=0;
                     discard=false;
-                } else if(ch==127 || ch==8) {
-                    if(used)used--;
+                } else if(ch==127 || ch==8 ||
+                          (terminal && saved.c_cc[VERASE]!=_POSIX_VDISABLE &&
+                           ch==saved.c_cc[VERASE])) {
+                    if(used) {
+                        used--;
+                        if(terminal)fputs("\b \b",stdout);
+                    }
+                } else if(ch==21) { /* Ctrl+U: borrar la línea completa. */
+                    if(terminal)for(size_t j=0;j<used;j++)fputs("\b \b",stdout);
+                    used=0;
+                    discard=false;
                 } else if(ch<32 || used>=sizeof input-1)discard=true;
-                else if(!discard)input[used++]=(char)ch;
+                else if(!discard) {
+                    input[used++]=(char)ch;
+                    if(terminal)putchar(ch);
+                }
+                if(terminal)fflush(stdout);
             }
         }
     }

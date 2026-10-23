@@ -12,6 +12,7 @@ import signal
 import struct
 import subprocess
 import tempfile
+import termios
 import threading
 import time
 import tty
@@ -89,7 +90,7 @@ class NativeNode:
 
 
 class HostSession:
-    def __init__(self, directory, nodes, algorithm="EDF", tick_us=10000):
+    def __init__(self, directory, nodes, algorithm="EDF", tick_us=10000, terminal=False):
         self.directory = Path(directory)
         tasks = self.directory / "input.csv"
         tasks.write_text("1,P,1,10,10,2\n2,S,1,100,100,-1\n3,S,1,100,100,9\n")
@@ -99,7 +100,12 @@ class HostSession:
                           f"esp_port={nodes[0].path}\npico_port={nodes[1].path}\n"
                           f"report_ticks=5\nmissed_reports=40\ntimeout_ms=100\n"
                           f"tasks={tasks}\noutput={self.output}\n")
-        self.process = subprocess.Popen([ROOT / "build/host", config], stdin=subprocess.PIPE,
+        self.input_master = self.input_slave = None
+        if terminal:
+            self.input_master, self.input_slave = os.openpty()
+            self.saved_terminal = termios.tcgetattr(self.input_slave)
+        self.process = subprocess.Popen([ROOT / "build/host", config],
+                                        stdin=self.input_slave if terminal else subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                         text=True, bufsize=1)
         self.lines = []
@@ -124,18 +130,22 @@ class HostSession:
                 self.condition.wait(timeout=min(0.1, deadline - time.monotonic()))
 
     def command(self, text):
-        self.process.stdin.write(text + "\n")
-        self.process.stdin.flush()
+        if self.input_master is not None:
+            os.write(self.input_master, (text + "\n").encode())
+        else:
+            self.process.stdin.write(text + "\n")
+            self.process.stdin.flush()
 
     def finish(self, stop=True):
         if stop:
             self.command("q")
-        else:
+        elif stop is False:
             self.process.send_signal(signal.SIGTERM)
         self.process.wait(timeout=10)
         self.reader.join(timeout=2)
         stderr = self.process.stderr.read()
-        self.process.stdin.close()
+        if self.process.stdin:
+            self.process.stdin.close()
         self.process.stdout.close()
         self.process.stderr.close()
         assert self.process.returncode == 0, (self.lines, stderr)
@@ -145,6 +155,10 @@ class HostSession:
         if self.process.poll() is None:
             self.process.kill()
             self.process.wait()
+        for fd in (self.input_master, self.input_slave):
+            if fd is not None:
+                os.close(fd)
+        self.input_master = self.input_slave = None
 
     def rows(self, name):
         with (self.output / name).open() as handle:
@@ -215,14 +229,14 @@ class Integration(unittest.TestCase):
                     placement = next(line for line in session.lines if "Tarea 1: ADMITIDA" in line)
                     failed = 1 if "[Pico]" in placement else 0
                     survivor = 1 - failed
-                    session.command("trigger 2")
+                    session.command("TrIgGeR 2")
                     time.sleep(0.04)
                     session.command("trigger 2")
                     session.command("trigger 3")
-                    session.command("add 4,P,1,20,20,-5")
+                    session.command("AdD 4,p,1,20,20,-5")
                     session.wait("DESPLEGADA y confirmada sin reiniciar tick")
                     time.sleep(0.25)
-                    session.command("fail pico" if failed else "fail esp")
+                    session.command("FaIl PiCo" if failed else "FAIL ESP")
                     session.wait("REUBICADA y confirmada")
                     time.sleep(0.3)
                     stderr = session.finish()
@@ -249,6 +263,41 @@ class Integration(unittest.TestCase):
                         session.close()
                     for node in nodes:
                         node.close()
+
+    def test_terminal_editing_and_case(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            try:
+                session = HostSession(directory, nodes, terminal=True)
+                session.wait("Comandos:")
+                active = termios.tcgetattr(session.input_slave)
+                self.assertFalse(active[3] & (termios.ICANON | termios.ECHO))
+                # Ambos códigos de Backspace corrigen el CSV antes de enviarlo.
+                session.command("\x7f\x08AdD 40,p,1,20,20,-5x\x7f\x085")
+                session.wait("Tarea 40: DESPLEGADA y confirmada sin reiniciar tick")
+                session.command("StAtUx\x7fS")
+                session.wait("U=")
+                # Ctrl+U permite recuperarse incluso de una línea excesiva.
+                session.command("z" * 300 + "\x15AdD 41,P,1,20,20,2")
+                session.wait("Tarea 41: DESPLEGADA y confirmada sin reiniciar tick")
+                # Q sigue siendo inmediato: no requiere Enter.
+                os.write(session.input_master, b"Q")
+                stderr = session.finish(stop=None)
+                self.assertEqual(termios.tcgetattr(session.input_slave), session.saved_terminal)
+                output = "".join(session.lines)
+                self.assertIn("\b \b", output)
+                self.assertNotIn("^?", output)
+                self.assertNotIn("Tarea inválida", stderr)
+                rows = session.rows("events.csv")
+                self.assertEqual(sum("STOP: confirmado" in row["detail"] for row in rows), 2)
+                self.assertTrue(any(row["id"] == "40" and row["kind"] == "6" and
+                                    row["code"] == "1" for row in rows))
+            finally:
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
 
     def test_calibration_timeout_and_autonomy(self):
         with tempfile.TemporaryDirectory() as directory:
