@@ -9,10 +9,21 @@ SOURCES = $(CORE) src/serial.c src/driver.c src/report.c src/main.c
 WIRE = ../common/rt_protocol.h
 ESP = ../nodo1ESP/ESP_RT_Timer
 PICO = ../node2
+CONFIG ?= examples/host.ini
+PIO ?= $(if $(wildcard $(HOME)/.platformio/penv/bin/pio),$(HOME)/.platformio/penv/bin/pio,pio)
 PICO_SRC = $(wildcard $(PICO)/src/*.cpp) $(wildcard $(PICO)/src/scheduler/*.cpp)
 ESP_TESTS = $(addprefix build/esp_,sched_core_test task_parser_test event_queue_test tick_report_test)
-.PHONY: all test clean sanitize
+.PHONY: all run run-host setup-usb test clean sanitize
 all: build/host
+run: build/host
+	@sh scripts/run.sh "$(CONFIG)" "$(PIO)"
+run-host: build/host
+	./build/host "$(CONFIG)"
+setup-usb:
+	sudo install -m 0644 scripts/udev/60-rt-pico.rules /etc/udev/rules.d/60-rt-pico.rules
+	sudo udevadm control --reload-rules
+	sudo udevadm trigger --action=add --subsystem-match=usb --attr-match=idVendor=2e8a --attr-match=idProduct=0003
+	@printf 'Permisos BOOTSEL configurados para la sesión local. Vuelve a ejecutar make run.\n'
 build:
 	mkdir -p build
 build/host: $(SOURCES) include/host.h $(WIRE) | build

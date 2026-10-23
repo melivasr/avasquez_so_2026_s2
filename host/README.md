@@ -14,6 +14,51 @@ make
 ./build/host examples/host.ini
 ```
 
+Para compilar, cargar ambas placas e iniciar el host con un solo comando:
+
+```sh
+make run
+# Solo iniciar el host cuando las placas ya tienen el firmware actualizado:
+make run-host
+# Configuración distinta (ruta relativa a host/) y PlatformIO explícito:
+make run CONFIG=examples/host.ini PIO="$HOME/.platformio/penv/bin/pio"
+```
+
+Estos objetivos también funcionan desde la raíz del repositorio. `make run`
+usa `esp_port` y `pico_port` del mismo archivo de configuración para cargar los
+firmwares y conectar el host. Primero compila ambos firmwares; después carga
+`esp32dev` y `pico`, en secuencia. Si falla una compilación o carga, no inicia el
+host. Espera hasta 10 s a que reaparezcan los puertos tras la carga USB.
+Conectar ambas placas y cerrar los monitores seriales antes de ejecutarlo.
+La primera carga de Pico puede requerir BOOTSEL según el firmware previo.
+
+Si `picotool` detecta la Pico en BOOTSEL pero informa que no puede acceder por
+permisos, configurar una vez el acceso USB desde la sesión de escritorio Linux:
+
+```sh
+make setup-usb
+make run
+```
+
+`setup-usb` pide la contraseña de sudo para instalar una regla udev específica
+del bootloader RP2040 (`2e8a:0003`), recargar las reglas y aplicarla a las Pico
+conectadas en BOOTSEL. La regla concede acceso al usuario de la sesión local
+mediante `uaccess`, siguiendo las [reglas oficiales de picotool](https://github.com/raspberrypi/picotool/blob/master/udev/60-picotool.rules).
+No hace falta ejecutar `make run` con sudo.
+
+Tras una carga fallida la Pico puede quedarse en BOOTSEL: en ese estado es
+normal que desaparezca `/dev/ttyACM0`. `make run` detecta el bootloader USB y
+permite reintentar la carga sin exigir el puerto serial. Si necesitas entrar
+manualmente, desconecta la Pico, mantén BOOTSEL pulsado al conectar USB y suelta
+el botón. Tras una carga exitosa debe reaparecer el puerto configurado antes de
+que arranque el host. Si cambia el nombre, actualiza `pico_port` en el INI.
+
+Se requiere PlatformIO para `make run`. Por defecto se usa el ejecutable de
+`~/.platformio/penv/bin/pio` cuando existe; en otro caso, `pio` del PATH. La
+variable `PIO` permite elegir otro ejecutable. `make` conserva la compilación
+habitual del host y `make run-host` no requiere PlatformIO. Las rutas de `CONFIG`
+y las rutas internas de ese archivo se interpretan desde `host/`.
+
 Las rutas de configuración son relativas al directorio de ejecución. Los puertos
 son 115200, 8N1, sin control de flujo, abiertos exclusivamente por su controlador.
 El usuario debe tener acceso a los dispositivos seriales. No ejecutar dos hosts

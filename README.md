@@ -15,12 +15,18 @@ make -C host
 make -C host test
 ```
 
-Para usar placas, compilar/cargar ambos firmwares actualizados y configurar sus
-puertos en host/examples/host.ini. Desde host/, ejecutar:
+Para usar placas, configurar sus puertos en `host/examples/host.ini`, conectar
+ambas y cerrar los monitores seriales. Desde la raíz o desde `host/`, ejecutar:
 
 ```sh
-./build/host examples/host.ini
+make run
 ```
+
+Esto compila el host y ambos firmwares, carga ESP32 y Pico en secuencia y arranca
+el host. Requiere PlatformIO. Si las placas ya tienen el firmware actualizado,
+`make run-host` inicia únicamente el host. Finalizar con `q` genera el reporte.
+Si la carga de Pico falla por permisos de BOOTSEL, ejecutar una vez
+`make setup-usb` (pide sudo) y repetir `make run`.
 
 Las constantes compartidas están en common/rt_protocol.h; conservar la estructura
 del repositorio al compilar los proyectos PlatformIO.

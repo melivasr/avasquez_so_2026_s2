@@ -1,0 +1,3 @@
+# Acceso del usuario de la sesión local al bootloader USB de Raspberry Pi Pico.
+# Subconjunto RP2040 de https://github.com/raspberrypi/picotool/blob/master/udev/60-picotool.rules
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", TAG+="uaccess"
