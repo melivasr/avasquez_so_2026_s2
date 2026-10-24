@@ -21,7 +21,7 @@ typedef enum { FIRST_FIT, WORST_FIT } Heuristic;
 typedef struct { uint32_t id, W, T, D; int32_t criticality; char type; } Task;
 typedef struct {
     Algorithm algorithm; Heuristic heuristic;
-    uint32_t tick_us, report_ticks, missed_reports, timeout_ms;
+    uint32_t tick_us, report_ticks, missed_reports, timeout_ms, duration_s;
     char ports[NODES][256], tasks[512], output[512];
 } Config;
 typedef struct { bool operational; uint32_t speed; size_t count; Task tasks[NODE_CAP]; } Node;

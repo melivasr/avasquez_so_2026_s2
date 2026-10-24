@@ -90,7 +90,8 @@ class NativeNode:
 
 
 class HostSession:
-    def __init__(self, directory, nodes, algorithm="EDF", tick_us=10000, terminal=False):
+    def __init__(self, directory, nodes, algorithm="EDF", tick_us=10000, terminal=False,
+                 duration_s=0):
         self.directory = Path(directory)
         tasks = self.directory / "input.csv"
         tasks.write_text("1,P,1,10,10,2\n2,S,1,100,100,-1\n3,S,1,100,100,9\n")
@@ -99,7 +100,7 @@ class HostSession:
         config.write_text(f"algorithm={algorithm}\nheuristic=First-Fit\ntick_us={tick_us}\n"
                           f"esp_port={nodes[0].path}\npico_port={nodes[1].path}\n"
                           f"report_ticks=5\nmissed_reports=40\ntimeout_ms=100\n"
-                          f"tasks={tasks}\noutput={self.output}\n")
+                          f"tasks={tasks}\noutput={self.output}\nduration_s={duration_s}\n")
         self.input_master = self.input_slave = None
         if terminal:
             self.input_master, self.input_slave = os.openpty()
@@ -260,11 +261,102 @@ class Integration(unittest.TestCase):
                     st = next(r for r in stats if r["id"] == "2")
                     self.assertEqual(int(st["sporadic_ignored"]), 1)
                     self.assertTrue(session.rows("gantt.csv"))
+                    stop_record = next(r for r in rows if r["kind"] == "9"
+                                       and r["node"] == str(failed))
+                    migrated = next(r for r in rows if r["node"] == str(survivor)
+                                    and "REUBICADA y confirmada" in r["detail"])
+                    self.assertLess(int(stop_record["host_monotonic_ns"]),
+                                    int(migrated["host_monotonic_ns"]))
                 finally:
                     if session:
                         session.close()
                     for node in nodes:
                         node.close()
+
+    def test_fail_stops_each_node(self):
+        for failed in (0, 1):
+            with self.subTest(failed=failed), tempfile.TemporaryDirectory() as directory:
+                nodes = [NativeNode(), NativeNode()]
+                session = None
+                try:
+                    session = HostSession(directory, nodes)
+                    session.wait("Comandos:")
+                    time.sleep(0.15)
+                    name = "Pico" if failed else "ESP32"
+                    fail_command = "fail pico" if failed else "fail esp"
+                    session.command(fail_command)
+                    session.wait(f"{name}: detenido; reubicando tareas.")
+                    nodes[failed].collect(0.2)
+                    self.assertFalse(nodes[failed].frames,
+                                     "el nodo siguió enviando telemetría tras fail")
+                    session.command(fail_command)
+                    session.wait(f"{name} ya está fuera de servicio.")
+                    session.finish()
+                    rows = session.rows("events.csv")
+                    stops = [r for r in rows if r["kind"] == "9"]
+                    self.assertEqual(sorted(r["node"] for r in stops), ["0", "1"])
+                    stop = next(r for r in stops if r["node"] == str(failed))
+                    self.assertFalse(any(r["node"] == str(failed) and r["kind"] in ("3", "4")
+                                         and int(r["host_monotonic_ns"]) > int(stop["host_monotonic_ns"])
+                                         for r in rows))
+                    self.assertTrue(any(r["node"] == str(1-failed) and r["kind"] == "3"
+                                        and r["code"] == "3" and int(r["host_monotonic_ns"]) >
+                                        int(stop["host_monotonic_ns"]) for r in rows))
+                    self.assertEqual(sum("START confirmado" in r["detail"] for r in rows), 2)
+                    nodes[failed].collect(0.1)
+                    self.assertFalse(nodes[failed].frames, "q reactivó el nodo retirado")
+                finally:
+                    if session:
+                        session.close()
+                    for node in nodes:
+                        node.close()
+
+    def test_fail_then_q_in_same_input(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            try:
+                session = HostSession(directory, nodes)
+                session.wait("Comandos:")
+                placement = next(line for line in session.lines if "Tarea 1: ADMITIDA" in line)
+                failed = 1 if "[Pico]" in placement else 0
+                session.command(("fail pico" if failed else "fail esp") + "\nq")
+                session.finish(stop=None)
+                rows = session.rows("events.csv")
+                self.assertTrue(any("REUBICADA y confirmada" in r["detail"] for r in rows))
+                self.assertEqual(sum(r["kind"] == "9" for r in rows), 2)
+            finally:
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
+
+    def test_fail_without_stop_ack_still_migrates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            failed = None
+            try:
+                session = HostSession(directory, nodes)
+                session.wait("Comandos:")
+                placement = next(line for line in session.lines if "Tarea 1: ADMITIDA" in line)
+                failed = 1 if "[Pico]" in placement else 0
+                nodes[failed].process.send_signal(signal.SIGSTOP)
+                session.command("fail pico" if failed else "fail esp")
+                session.wait("REUBICADA y confirmada")
+                stderr = session.finish()
+                self.assertIn("no se pudo confirmar STOP", stderr)
+                rows = session.rows("events.csv")
+                self.assertTrue(any("detención no garantizada" in r["detail"] for r in rows))
+                self.assertFalse(any(r["kind"] == "9" and r["node"] == str(failed) for r in rows))
+                self.assertTrue(any(r["kind"] == "9" and r["node"] == str(1-failed) for r in rows))
+            finally:
+                if failed is not None:
+                    nodes[failed].process.send_signal(signal.SIGCONT)
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
 
     def test_duplicate_attempt_preserves_running_task(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -352,6 +444,53 @@ class Integration(unittest.TestCase):
                 for node in nodes:
                     node.close()
 
+    def test_automatic_stop_after_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            try:
+                # Calibrar toma 2.5 s: el límite de 1 s debe empezar después.
+                session = HostSession(directory, nodes, tick_us=50000, duration_s=1)
+                session.wait("Comandos:")
+                session.finish(stop=None)
+                self.assertIn("Duración de 1 s alcanzada", "".join(session.lines))
+                rows = session.rows("events.csv")
+                starts = [int(r["host_monotonic_ns"]) for r in rows
+                          if "START confirmado" in r["detail"]]
+                auto = next(int(r["host_monotonic_ns"]) for r in rows
+                            if "cierre automático con STOP" in r["detail"])
+                self.assertEqual(len(starts), 2)
+                self.assertGreaterEqual(auto - max(starts), 1_000_000_000)
+                self.assertLess(auto - max(starts), 2_000_000_000)
+                self.assertEqual(sum(r["detail"] == "STOP: confirmado" for r in rows), 2)
+                self.assertTrue(session.rows("tasks.csv"))
+                self.assertIn("</html>", (session.output / "report.html").read_text())
+                for node in nodes:
+                    node.collect(0.15)
+                    self.assertFalse(node.frames, "telemetría tras el cierre automático")
+            finally:
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
+
+    def test_manual_stop_before_duration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            try:
+                session = HostSession(directory, nodes, duration_s=60)
+                session.wait("Comandos:")
+                session.finish()
+                rows = session.rows("events.csv")
+                self.assertEqual(sum(r["detail"] == "STOP: confirmado" for r in rows), 2)
+                self.assertFalse(any("cierre automático con STOP" in r["detail"] for r in rows))
+            finally:
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
+
     def test_invalid_config_before_serial(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)
@@ -362,6 +501,11 @@ class Integration(unittest.TestCase):
             config.write_text(base + "report_ticks=65536\n")
             result = subprocess.run([ROOT / "build/host", config], capture_output=True, timeout=3)
             self.assertEqual(result.returncode, 2)
+            for invalid in ("-1", "1.5", "86401", "4294967296", "30\nduration_s=40"):
+                with self.subTest(duration_s=invalid):
+                    config.write_text(base + f"duration_s={invalid}\n")
+                    result = subprocess.run([ROOT / "build/host", config], capture_output=True, timeout=3)
+                    self.assertEqual(result.returncode, 2)
             config.write_text(base)
             tasks.write_text("65536,P,1,10,10,1\n")
             result = subprocess.run([ROOT / "build/host", config], capture_output=True, timeout=3)

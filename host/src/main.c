@@ -19,7 +19,7 @@ typedef struct {
     pid_t drivers[NODES],reporter;
     int wake[NODES],signals;
     bool started[NODES],failed[NODES],expected_exit[NODES],quit,stop_nodes,fatal;
-    uint64_t start_ns[NODES];
+    uint64_t start_ns[NODES],run_deadline_ns;
     uint32_t pending_timeout[NODES];
     Task ids[TASK_CAP];
     size_t ids_count;
@@ -33,6 +33,13 @@ static void inspect(Host *h) {
     uint64_t now=monotonic_ns(),last[NODES]= {
         0
     };
+    if(!h->quit && h->run_deadline_ns && now>=h->run_deadline_ns) {
+        h->quit=true;
+        h->stop_nodes=true;
+        note(h->shared,-1,"duración de %"PRIu32" s alcanzada; cierre automático con STOP",h->cfg.duration_s);
+        printf("\nDuración de %"PRIu32" s alcanzada; deteniendo nodos y generando reporte.\n",h->cfg.duration_s);
+        fflush(stdout);
+    }
     bool io[NODES]= {
         0
     };
@@ -222,6 +229,35 @@ static void manual_add(Host *h,const char *line) {
     else deploy_add(h,n,&t,"DESPLEGADA y confirmada sin reiniciar tick");
 }
 
+static void manual_fail(Host *h,int n) {
+    const char *name=n?"Pico":"ESP32";
+    if(!h->nodes[n].operational || h->expected_exit[n]) {
+        printf("%s ya está fuera de servicio.\n",name);
+        fflush(stdout);
+        return;
+    }
+    /* Retirarlo de la planificación evita que el watchdog interprete el
+     * vaciado de STOP como otra falla. La migración espera su respuesta. */
+    quarantine(h,n);
+    Frame stop={.type=STOP};
+    Record reply=transaction(h,n,&stop);
+    bool stopped=reply.code==REPLY_OK;
+    note(h->shared,n,"desconexión simulada mediante comando fail; STOP %s",
+         stopped?"confirmado":"sin confirmación/rechazado; detención no garantizada");
+    if(stopped) {
+        printf("%s: detenido; reubicando tareas.\n",name);
+        fflush(stdout);
+    } else {
+        fprintf(stderr,"%s: no se pudo confirmar STOP; no se garantiza su detención. Se intentará reubicar sus tareas.\n",name);
+    }
+    Record close_driver={.kind=R_EXIT};
+    h->expected_exit[n]=true;
+    queue_push(&h->shared->commands[n],&close_driver,20);
+    eventfd_write(h->wake[n],1);
+    /* Completar también si el usuario envió fail y q en el mismo bloque. */
+    if(!h->quit)relocate(h);
+}
+
 static void command(Host *h,const char *raw_line) {
     char line[256];
     size_t length=strlen(raw_line);
@@ -249,15 +285,7 @@ static void command(Host *h,const char *raw_line) {
         for(int n=0;n<2;n++)printf("%s: %s s=%"PRIu32" tareas=%zu U=%.6Lf\n",n?"Pico":"ESP32",h->nodes[n].operational?"operativo":"caído/no iniciado",h->nodes[n].speed,h->nodes[n].count,node_util(&h->nodes[n]));
         fflush(stdout);
     } else if(!strcmp(line,"FAIL ESP") || !strcmp(line,"FAIL PICO")) {
-        int n=!strcmp(line,"FAIL PICO");
-        quarantine(h,n);
-        Record r= {
-            .kind=R_EXIT
-        };
-        queue_push(&h->shared->commands[n],&r,20);
-        eventfd_write(h->wake[n],1);
-        h->expected_exit[n]=true;
-        note(h->shared,n,"desconexión simulada mediante comando fail; sin STOP");
+        manual_fail(h,!strcmp(line,"FAIL PICO"));
     } else if(*line)fprintf(stderr,"Comandos: add id,P|S,W,T,D,criticidad | trigger id | status | fail esp | fail pico | q\n");
 }
 
@@ -461,6 +489,12 @@ int main(int argc,char **argv) {
     }
     note(h.shared,-1,"inicio: coordinador=%ld, ESP32=%ld, Pico=%ld, reporte=%ld",(long)getpid(),(long)h.drivers[0],(long)h.drivers[1],(long)h.reporter);
     bootstrap(&h,tasks,count);
+    if(h.cfg.duration_s && !h.quit) {
+        /* El límite mide ejecución: excluye calibración y despliegue. */
+        h.run_deadline_ns=monotonic_ns()+(uint64_t)h.cfg.duration_s*1000000000;
+        note(h.shared,-1,"duración automática: %"PRIu32" s desde fin del arranque",h.cfg.duration_s);
+        printf("Cierre automático en %"PRIu32" s (q permite terminar antes).\n",h.cfg.duration_s);
+    }
     struct termios saved;
     bool terminal=isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO,&saved)==0;
     if(terminal) {

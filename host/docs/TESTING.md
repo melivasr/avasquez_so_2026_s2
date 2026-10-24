@@ -40,8 +40,11 @@ en esta prueba; el runtime ESP-IDF se comprueba por separado en sus módulos pur
   tareas, ID 65535, ADD_TASK, disparo/intervalo mínimo, CRC malo, STOP con vaciado,
   arranque del host en RMS/EDF, inserción y migración sin otro START, rechazo de
   esporádica del caído, reportes CSV/Gantt, calibración que supera timeout_ms,
-  continuidad de nodos tras SIGTERM, heartbeat con la cola de eventos saturada
-  y entradas inválidas antes de abrir puertos.
+  continuidad de nodos tras SIGTERM, heartbeat con la cola de eventos saturada,
+  cierre automático tras el arranque con STOP y reporte, terminación manual
+  antes del límite, fail con STOP previo a migrar, ambos comandos fail,
+  ausencia de telemetría posterior, fail seguido de q en el mismo bloque,
+  reubicación aunque falte el ACK de STOP y entradas inválidas antes de abrir puertos.
 
 `make sanitize` compila con AddressSanitizer y UndefinedBehaviorSanitizer. La
 opción mostrada desactiva únicamente LeakSanitizer; no constituye prueba de fugas.
@@ -49,10 +52,12 @@ El adaptador nativo no prueba el SDK, ISR reales, USB físico, LEDs ni botones.
 
 ## Comparaciones
 
-`examples/edf_vs_rms.csv` y `examples/ff_vs_wf.csv` siguen siendo entradas útiles
-para experimentos. Sus resultados dependen de s_n medido. No se supone una
-velocidad fija para ninguna placa ni se presentan las pruebas nativas como
-experimentos físicos RMS/EDF o FF/WF.
+`examples/edf_vs_rms.csv` y `examples/ff_vs_wf.csv`, junto con las cuatro
+configuraciones `examples/experiment_*.ini`, preparan las comparaciones físicas.
+[EXPERIMENTS.md](EXPERIMENTS.md) detalla los comandos y resultados esperados
+usando como referencia ESP32=70 y Pico=105 UT/tick. Los resultados dependen de
+s_n medido en cada corrida. No se fija la velocidad de ninguna placa ni se
+presentan las pruebas nativas como experimentos físicos RMS/EDF o FF/WF.
 
 ## Validación con placas
 

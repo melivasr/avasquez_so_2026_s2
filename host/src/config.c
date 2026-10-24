@@ -26,7 +26,7 @@ bool config_load(const char *path,Config *c,char *err,size_t n) {
     unsigned seen=0;
     int read_result;
     const char *keys[]= {
-        "algorithm","heuristic","tick_us","esp_port","pico_port","report_ticks","missed_reports","tasks","output","timeout_ms"
+        "algorithm","heuristic","tick_us","esp_port","pico_port","report_ticks","missed_reports","tasks","output","timeout_ms","duration_s"
     };
     while ((read_result=bounded_line(f,line,sizeof line))>0) {
         ln++;
@@ -40,7 +40,7 @@ bool config_load(const char *path,Config *c,char *err,size_t n) {
         *eq=0;
         char *key=trim(s),*v=trim(eq+1);
         int k=-1;
-        for(int i=0;i<10;i++) if(!strcmp(key,keys[i])) k=i;
+        for(int i=0;i<11;i++) if(!strcmp(key,keys[i])) k=i;
         if(k<0 || (seen&(1u<<k)) || !*v) {
             ok=false;
             break;
@@ -61,7 +61,7 @@ bool config_load(const char *path,Config *c,char *err,size_t n) {
             if(strlen(v)>=sz) ok=false;
             else memcpy(dst,v,strlen(v)+1);
         } else {
-            if(!parse_u32(v,&x) || !x) ok=false;
+            if(!parse_u32(v,&x) || (!x && k!=10)) ok=false;
             else if(k==2) {
                 c->tick_us=x;
                 if(x<1000 || x>1000000) ok=false;
@@ -70,9 +70,12 @@ bool config_load(const char *path,Config *c,char *err,size_t n) {
                 if(x>UINT16_MAX)ok=false;
             }
             else if(k==6) c->missed_reports=x;
-            else {
+            else if(k==9) {
                 c->timeout_ms=x;
                 if(x<100 || x>60000) ok=false;
+            } else {
+                c->duration_s=x;
+                if(x>86400) ok=false;
             }
         }
         if(!ok) break;

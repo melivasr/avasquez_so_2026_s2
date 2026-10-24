@@ -368,6 +368,7 @@ static uint8_t do_stop()
     timer_destroy(g_timer, true);
     g_timer = nullptr;
     show_slot(0);
+    gpio_set_level(LED_MISS_PIN, 0);
     return NODE_OK;
 }
 

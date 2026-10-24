@@ -130,9 +130,12 @@ Después de comprobar el funcionamiento normal, escribe:
 fail esp
 ```
 
-Este comando cierra el controlador del ESP32 y simula una falla de comunicación;
-no envía STOP al nodo. El nodo aislado puede continuar ejecutando si sigue
-alimentado.
+Este comando envía STOP al ESP32 y espera confirmación antes de cerrar su
+controlador y reubicar sus tareas. Debe detenerse su calendarizador y apagarse
+los indicadores de tarea y plazo perdido. La placa permanece alimentada.
+Si STOP no se confirma, el host avisa que no garantiza la detención y aun así
+intenta reubicar las tareas. Una desconexión física de USB también provoca
+reubicación, pero no permite enviar STOP al nodo retirado.
 
 Espera los mensajes de reubicación y luego consulta:
 

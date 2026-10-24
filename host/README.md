@@ -84,6 +84,7 @@ validación física ni una compilación con los SDK.
 | `report_ticks` | 10; rango 1–65535 |
 | `missed_reports` | 3; entero positivo |
 | `timeout_ms` | 2000; rango 100–60000 ms por intercambio serial |
+| `duration_s` | 0 (sin límite); rango 0–86400 s de ejecución tras calibrar, desplegar e iniciar los nodos |
 | `tasks` | Archivo CSV obligatorio |
 | `output` | `report`; directorio de salida, se sobrescriben sus cuatro reportes |
 
@@ -93,6 +94,13 @@ puede exceder 24 h. Conviene usar una ventana mayor que el jitter USB esperado.
 Ambos nodos miden 50 ticks al calibrar. El host ajusta automáticamente la espera
 de calibración a esa ventana más 1 s; STOP/ADD_TASK admiten al menos un tick
 más 1 s. `timeout_ms` puede ampliar esas esperas. No se fijan velocidades reales.
+
+Con `duration_s=30`, tanto `make host` como `make run` detienen los nodos y
+generan el reporte automáticamente tras 30 s de ejecución. La compilación,
+carga y calibración quedan fuera de ese tiempo. El límite se comprueba en el
+bucle de control (normalmente cada 100 ms); el cierre y vaciado del reporte
+añaden un tiempo breve. `q` permite terminar antes. Omitir la clave o usar
+`duration_s=0` conserva la duración libre.
 
 ## Tareas y comandos
 
@@ -131,9 +139,13 @@ prioridades locales siguen el algoritmo RMS o EDF seleccionado.
 
 | Archivo | Para qué sirve |
 |---|---|
-| `examples/tasks.csv` | Carga inicial de muestra: dos tareas periódicas y una esporádica. Es la que utiliza `examples/host.ini` por defecto. |
-| `examples/edf_vs_rms.csv` | Comparar admisión EDF/RMS: con velocidades sintéticas 10/10 UT por tick y First-Fit, EDF admite las cuatro tareas y RMS rechaza las tareas 3 y 4. |
-| `examples/ff_vs_wf.csv` | Comparar asignación First-Fit/Worst-Fit: con velocidades sintéticas 10/5 UT por tick y EDF, First-Fit pone ambas tareas en ESP32 y Worst-Fit pone una en cada nodo. |
+| `examples/tasks.csv` | Doce tareas para verificar HW: periódicas, plazo corto, esporádicas y rechazos. Es la que utiliza `examples/host.ini` por defecto. |
+| `examples/edf_vs_rms.csv` | Ocho tareas: con ESP32=70 y Pico=105 UT/tick y First-Fit, EDF admite todas y RMS rechaza los IDs 6, 7 y 8. |
+| `examples/ff_vs_wf.csv` | Ocho tareas: con ESP32=70 y Pico=105 UT/tick y EDF, First-Fit pone todas en Pico y Worst-Fit reparte cinco en Pico y tres en ESP32. |
+
+Las cuatro configuraciones `examples/experiment_*.ini` guardan reportes por
+separado. Ver [EXPERIMENTS.md](docs/EXPERIMENTS.md) para comandos, cálculos,
+asignaciones esperadas y criterios de comparación en HW.
 
 Para cargar otro conjunto, cambiar `tasks=examples/tasks.csv` en la configuración
 por la ruta del CSV elegido. El archivo CSV describe las tareas; `algorithm` y
@@ -159,9 +171,12 @@ sin detener tareas ni reenviar START. `trigger` es una solicitud diagnóstica de
 liberación esporádica; el nodo conserva la decisión de ignorarla por intervalo
 mínimo. El botón físico, debounce e interrupción siguen perteneciendo al nodo.
 
-`fail esp`/`fail pico` cierran el controlador correspondiente sin STOP y provocan
-reubicación. También se puede desconectar USB. **Una falla de comunicación no
-prueba que el procesador dejó de ejecutar:** si sigue alimentado, el nodo aislado
+`fail esp`/`fail pico` envían STOP al nodo elegido, esperan su ACK con límite,
+cierran su controlador y reubican sus tareas. El nodo deja de ejecutar y apaga
+sus indicadores de tarea y plazo perdido; permanece alimentado. Si STOP no se
+confirma, se avisa que la detención no está garantizada y se intenta reubicar.
+También se puede desconectar USB. **Una falla real de comunicación no prueba
+que el procesador dejó de ejecutar:** si sigue alimentado, el nodo aislado
 puede continuar tareas que también se reubican. El proyecto no define fencing
 ni consenso distribuido; la aplicación no garantiza ejecución única ante una
 partición de comunicación. Para experimentos sin duplicados, apagar el nodo
