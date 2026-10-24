@@ -13,11 +13,11 @@ CONFIG ?= examples/host.ini
 PIO ?= $(if $(wildcard $(HOME)/.platformio/penv/bin/pio),$(HOME)/.platformio/penv/bin/pio,pio)
 PICO_SRC = $(wildcard $(PICO)/src/*.cpp) $(wildcard $(PICO)/src/scheduler/*.cpp)
 ESP_TESTS = $(addprefix build/esp_,sched_core_test task_parser_test event_queue_test tick_report_test)
-.PHONY: all run run-host setup-usb test clean sanitize
+.PHONY: all run host run-host setup-usb test clean sanitize
 all: build/host
 run: build/host
 	@sh scripts/run.sh "$(CONFIG)" "$(PIO)"
-run-host: build/host
+host run-host: build/host
 	./build/host "$(CONFIG)"
 setup-usb:
 	sudo install -m 0644 scripts/udev/60-rt-pico.rules /etc/udev/rules.d/60-rt-pico.rules

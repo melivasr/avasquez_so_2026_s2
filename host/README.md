@@ -19,7 +19,7 @@ Para compilar, cargar ambas placas e iniciar el host con un solo comando:
 ```sh
 make run
 # Solo iniciar el host cuando las placas ya tienen el firmware actualizado:
-make run-host
+make host
 # Configuración distinta (ruta relativa a host/) y PlatformIO explícito:
 make run CONFIG=examples/host.ini PIO="$HOME/.platformio/penv/bin/pio"
 ```
@@ -56,7 +56,8 @@ que arranque el host. Si cambia el nombre, actualiza `pico_port` en el INI.
 Se requiere PlatformIO para `make run`. Por defecto se usa el ejecutable de
 `~/.platformio/penv/bin/pio` cuando existe; en otro caso, `pio` del PATH. La
 variable `PIO` permite elegir otro ejecutable. `make` conserva la compilación
-habitual del host y `make run-host` no requiere PlatformIO. Las rutas de `CONFIG`
+habitual del host y `make host` no requiere PlatformIO. `make run-host` sigue
+disponible como alias. Las rutas de `CONFIG`
 y las rutas internas de ese archivo se interpretan desde `host/`.
 
 Las rutas de configuración son relativas al directorio de ejecución. Los puertos

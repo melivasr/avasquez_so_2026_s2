@@ -24,7 +24,8 @@ make run
 
 Esto compila el host y ambos firmwares, carga ESP32 y Pico en secuencia y arranca
 el host. Requiere PlatformIO. Si las placas ya tienen el firmware actualizado,
-`make run-host` inicia únicamente el host. Finalizar con `q` genera el reporte.
+`make host` inicia únicamente el host (`make run-host` también funciona).
+Finalizar con `q` genera el reporte.
 Si la carga de Pico falla por permisos de BOOTSEL, ejecutar una vez
 `make setup-usb` (pide sudo) y repetir `make run`.
 
