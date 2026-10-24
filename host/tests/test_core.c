@@ -27,6 +27,11 @@ static void tasks_and_admission(void) {
     Task lost[NODE_CAP]; bool keep[NODE_CAP];
     assert(migrate_plan(nodes,0,EDF,FIRST_FIT,lost,keep)==2);
     assert(!keep[1]); /* Una esporádica no migra. */
+    Node empty={.operational=true,.speed=1};
+    t=(Task){.id=10,.type='P',.W=3,.T=UINT32_MAX,.D=UINT32_MAX};
+    assert(admission(&empty,&t,EDF)==NULL); /* Plazo grande representable en uint64. */
+    t.T=10;
+    assert(strstr(admission(&empty,&t,EDF),"trabajos pendientes"));
 }
 
 static void wire_and_telemetry(void) {

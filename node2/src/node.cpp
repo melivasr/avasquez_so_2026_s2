@@ -124,6 +124,11 @@ static void handle_deploy_tasks(const Frame *frame){
         return;
     }
 
+    if (!rt_jobs_fit(pending, count)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
     // todas las tareas son válidas: reemplazan a las anteriores
     for (size_t i = 0; i < count; i++) {
         tasks[i] = pending[i];
@@ -232,6 +237,10 @@ static void handle_add_task(const Frame *frame){
             send_ack(frame, StatusCode::Error);
             return;
         }
+    }
+    if (!rt_jobs_fit(tasks, task_count, &task)) {
+        send_ack(frame, StatusCode::Error);
+        return;
     }
     if (state == NodeState::Running) {
         if (!scheduler->add_task(task, tick_count)) {
@@ -419,7 +428,7 @@ void node_tick(){
     const uint32_t start_us = micros();
 
     // el timer todavía no marcó el tick que sigue
-    if (reached < tick_count) {
+    if ((int32_t)(reached - tick_count) < 0) {
         return;
     }
 
@@ -431,7 +440,7 @@ void node_tick(){
 
     // se atrasó: los ticks que faltaron se cuentan y se salta al actual
     // 
-    if (reached > tick_count) {
+    if (reached != tick_count) {
         const uint32_t lost = reached - tick_count;
         ticks_lost += lost;
         usb_add_event(EventType::TickLost, reached, NO_TASK,

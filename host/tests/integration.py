@@ -188,12 +188,14 @@ class Integration(unittest.TestCase):
         kind, data = node.exchange(1, struct.pack("<I", 10000))
         self.assertEqual(kind, 2)
         self.assertGreater(struct.unpack("<I", data)[0], 0)
+        self.assertEqual(node.exchange(3, b"1,P,3,10,4294967295"), (9, b"\x03\x01"))
         # Tabla vacía borra una sesión anterior y aun así mantiene heartbeat.
         self.assertEqual(node.exchange(3), (9, b"\x03\x00"))
         self.assertEqual(node.exchange(4, b"\x01\x02\x00"), (9, b"\x04\x00"))
         node.collect(0.08)
         self.assertTrue(any(kind == 6 and len(data) == 22 for kind, data in node.frames))
         self.assertEqual(node.exchange(10, b"65535,P,1,10,10,-2147483648\n"), (9, b"\x0a\x00"))
+        self.assertEqual(node.exchange(10, b"12,P,3,10,4294967295"), (9, b"\x0a\x01"))
         node.collect(0.08)
         added = [event for event in node.events() if event[0] == 6]
         self.assertEqual(len(added), 1)
@@ -263,6 +265,35 @@ class Integration(unittest.TestCase):
                         session.close()
                     for node in nodes:
                         node.close()
+
+    def test_duplicate_attempt_preserves_running_task(self):
+        with tempfile.TemporaryDirectory() as directory:
+            nodes = [NativeNode(), NativeNode()]
+            session = None
+            try:
+                session = HostSession(directory, nodes)
+                session.wait("Comandos:")
+                session.command("add 1,P,999,1,1,99")
+                session.wait("tarea original conservada")
+                time.sleep(0.25)
+                session.finish()
+                rows = session.rows("events.csv")
+                attempts = [r for r in rows if r["kind"] == "6" and r["code"] == "5"]
+                self.assertEqual(len(attempts), 1)
+                attempt = attempts[0]
+                self.assertEqual(attempt["id"], "1")
+                self.assertTrue(any(r["kind"] == "3" and r["code"] == "3" and
+                                    r["id"] == "1" and int(r["host_monotonic_ns"]) >
+                                    int(attempt["host_monotonic_ns"]) for r in rows))
+                stat = next(r for r in session.rows("tasks.csv") if r["id"] == "1")
+                self.assertEqual((stat["W"], stat["T"], stat["D"]), ("1", "10", "10"))
+                self.assertFalse(any(r["kind"] == "6" and r["id"] == "1" and
+                                     r["code"] == "3" for r in rows))
+            finally:
+                if session:
+                    session.close()
+                for node in nodes:
+                    node.close()
 
     def test_terminal_editing_and_case(self):
         with tempfile.TemporaryDirectory() as directory:

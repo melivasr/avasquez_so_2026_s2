@@ -461,7 +461,7 @@ static void handle_tick()
     const uint32_t isr_ticks = g_isr_ticks;
 
     // Notificación sobrante de un tick ya absorbido: ignorar.
-    if (isr_ticks < g_sched.next_tick) {
+    if (static_cast<int32_t>(isr_ticks - g_sched.next_tick) < 0) {
         return;
     }
 
@@ -472,7 +472,7 @@ static void handle_tick()
 
     // Ticks no atendidos: se cuentan y el tiempo lógico salta al actual
     // (sin procesar ticks atrasados en ráfaga).
-    if (isr_ticks > g_sched.next_tick) {
+    if (isr_ticks != g_sched.next_tick) {
         const uint32_t lost = isr_ticks - g_sched.next_tick;
         g_stats.ticks_lost += lost;
         g_sched.next_tick = isr_ticks;

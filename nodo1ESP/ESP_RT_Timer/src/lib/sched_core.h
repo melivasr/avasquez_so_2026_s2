@@ -12,6 +12,7 @@
 
 #include "task.h"
 #include "task_parser.h"   // MAX_TASKS
+#include "../../../../common/rt_jobs.h"
 
 // Límite de id acordado en el diseño (cabe en 16 bits en los eventos).
 constexpr uint32_t SCHED_MAX_TASK_ID = RT_MAX_TASK_ID;
@@ -55,11 +56,13 @@ struct SchedSlot {
     Task task;
     uint32_t cost_ticks;   // C = ceil(W / sn)
     uint32_t job_seq;      // n.º del trabajo más reciente (empieza en 1)
-    uint32_t release_tick; // tick de liberación del trabajo activo
+    uint64_t release_tick; // última liberación (intervalo mínimo de la esporádica)
 };
 
 struct Scheduler {
     SchedSlot slots[MAX_TASKS];
+    RtJobs jobs;
+    RtClock clock;
     size_t count;
     Algorithm algorithm;
     uint32_t ut_per_tick;  // sn de la calibración

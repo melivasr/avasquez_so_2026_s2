@@ -20,8 +20,8 @@ struct Task {
 
     // Estado de ejecución local.
     uint32_t remaining;
-    uint32_t next_release;
-    uint32_t absolute_deadline;
+    uint64_t next_release;
+    uint64_t absolute_deadline;
 
     bool job_active;
 };

@@ -6,7 +6,7 @@ CFLAGS += -Wall -Wextra -Wpedantic -Wshadow -Wconversion -Wstrict-prototypes
 LDLIBS += -lm -pthread -lrt
 CORE = src/tasks.c src/config.c src/scheduler.c src/protocol.c src/ipc.c src/telemetry.c
 SOURCES = $(CORE) src/serial.c src/driver.c src/report.c src/main.c
-WIRE = ../common/rt_protocol.h
+WIRE = ../common/rt_protocol.h ../common/rt_jobs.h
 ESP = ../nodo1ESP/ESP_RT_Timer
 PICO = ../node2
 CONFIG ?= examples/host.ini
@@ -49,16 +49,22 @@ build/esp_%_test: $(ESP)/host_tests/%_test.cpp $(ESP)/src/%.cpp $(wildcard $(ESP
 	$(CXX) -I$(ESP)/src -std=c++17 -Wall -Wextra $< $(ESP)/src/$*.cpp $(LDFLAGS) -o $@
 build/test_pico: tests/test_pico.cpp $(PICO)/src/task_parser.cpp $(wildcard $(PICO)/src/scheduler/*.cpp) $(wildcard $(PICO)/include/*.h) $(wildcard $(PICO)/include/scheduler/*.h) $(WIRE) | build
 	$(CXX) -I$(PICO)/include -std=c++17 -Wall -Wextra tests/test_pico.cpp $(PICO)/src/task_parser.cpp $(wildcard $(PICO)/src/scheduler/*.cpp) $(LDFLAGS) -o $@
+build/jobs_pico: tests/test_jobs.cpp $(wildcard $(PICO)/src/scheduler/*.cpp) $(wildcard $(PICO)/include/scheduler/*.h) $(WIRE) | build
+	$(CXX) -I$(PICO)/include -std=c++17 -Wall -Wextra $< $(wildcard $(PICO)/src/scheduler/*.cpp) $(LDFLAGS) -o $@
+build/jobs_esp: tests/test_jobs.cpp $(ESP)/src/sched_core.cpp $(wildcard $(ESP)/src/lib/*.h) $(WIRE) | build
+	$(CXX) -I$(ESP)/src -DTEST_ESP -std=c++17 -Wall -Wextra $< $(ESP)/src/sched_core.cpp $(LDFLAGS) -o $@
 build/pico_ut.o: $(PICO)/src/ut.c $(PICO)/include/ut.h | build
 	$(CC) -I$(PICO)/include $(CFLAGS) -c $< -o $@
 build/native_pico: tests/native_pico.cpp tests/native/Arduino.h tests/native/pico/time.h $(PICO_SRC) $(wildcard $(PICO)/include/*.h) $(wildcard $(PICO)/include/scheduler/*.h) build/pico_ut.o $(WIRE) | build
 	$(CXX) -Itests/native -I$(PICO)/include -std=c++17 -O2 -Wall -Wextra tests/native_pico.cpp $(PICO_SRC) build/pico_ut.o $(LDFLAGS) -o $@
-test: build/host build/test_core build/test_report build/interop_esp build/interop_pico build/test_pico $(ESP_TESTS) build/native_pico
+test: build/host build/test_core build/test_report build/interop_esp build/interop_pico build/test_pico build/jobs_pico build/jobs_esp $(ESP_TESTS) build/native_pico
 	./build/test_core
 	./build/test_report
 	./build/interop_esp
 	./build/interop_pico
 	./build/test_pico
+	./build/jobs_pico
+	./build/jobs_esp
 	@for test in $(ESP_TESTS); do $$test || exit 1; done
 	python3 tests/integration.py
 sanitize:

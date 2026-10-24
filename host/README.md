@@ -112,6 +112,16 @@ iguales o mayores que T. Hay como máximo 512 IDs por sesión, incluidos rechaza
 no se reutilizan IDs. Como máximo ocho tareas desplegadas por nodo y una
 esporádica por nodo. Las líneas de tareas tienen un límite de 158 caracteres.
 
+Cada nodo reserva 64 registros de trabajos en RAM. Para garantizar que los
+trabajos solapados con `D > T` no se descarten, una tarea reserva
+`ceil(D/T) + 1` registros; el adicional cubre la liberación tardía tras ticks
+perdidos. La suma debe ser como máximo 64. El host informa un rechazo por
+capacidad de trabajos pendientes si se excede; los firmwares validan el mismo
+límite antes de configurar/agregar tareas. Esta comprobación de memoria se
+añade a la admisión RMS/EDF. No hay asignaciones de memoria durante los ticks.
+Los plazos y próximas liberaciones usan tiempo interno de 64 bits; los campos
+del protocolo siguen siendo de 32 bits.
+
 Los tres CSV de `examples/` son **archivos de entrada**: cada fila describe una
 tarea que el host intenta admitir y asignar a un nodo. La primera fila contiene
 los nombres de las columnas. `uint32` es un entero
@@ -237,6 +247,10 @@ EDF con D<T requiere otros análisis para una garantía general. El host conserv
 D y reporta misses reales. RMS y EDF se ejecutan en los nodos: RMS da prioridades
 fijas por período; EDF usa plazos absolutos dinámicos. El host únicamente
 particiona; nunca indica qué ejecutar por tick y no enlaza ni ejecuta UT.
+Cada trabajo conserva su número, plazo y progreso hasta completar o vencer.
+Una nueva liberación conserva los trabajos anteriores; dentro del mismo ID
+se ejecuta primero el trabajo más antiguo. El reporte correlaciona las
+liberaciones y finalizaciones de varios trabajos pendientes del mismo ID.
 
 En una caída se fija la carga previa del sobreviviente. Se descartan esporádicas,
 y se intenta el resto por utilización. Si no cabe todo, se elimina un candidato
@@ -253,6 +267,9 @@ Se generan `events.csv`, `gantt.csv`, `tasks.csv` y `report.html`. Abrir el HTML
 localmente. El reporte solo consume la cola compartida, nunca el serial.
 `events.csv` incluye decisiones de admisión, rechazos, confirmaciones, estados
 inciertos, errores, fallas, calibraciones, solicitudes y todos los eventos reales.
+Un intento manual con ID duplicado se registra con código de decisión 5
+(intento de alta rechazado). Se muestra en el historial y su contador; el
+estado final y los parámetros de la tarea original permanecen intactos.
 `tasks.csv` separa tiempo hasta primera ejecución y hasta finalización; conserva
 período, plazo, costo, criticidad, releases, misses y esporádicas ignoradas.
 `gantt.csv` y SVG reconstruyen intervalos mediante SWITCH, RELEASE, COMPLETE y

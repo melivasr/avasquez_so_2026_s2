@@ -7,6 +7,7 @@
 #include <semaphore.h>
 #include <sys/types.h>
 #include "../../common/rt_protocol.h"
+#include "../../common/rt_jobs.h"
 #define NODES 2
 #define NODE_CAP RT_MAX_TASKS
 #define TASK_CAP 512
@@ -52,6 +53,7 @@ Frame start_frame(const Config *);
 
 enum { R_COMMAND=1, R_REPLY, R_NODE, R_TICK, R_NOTE, R_TASK, R_END, R_EXIT, R_STOP };
 enum { REPLY_OK=0, REPLY_REJECT=1, REPLY_UNCERTAIN=2, REPLY_IO=3 };
+enum { TASK_ATTEMPT_REJECTED=5 }; /* Historial de alta; no cambia el estado del ID existente. */
 typedef struct {
     int kind, node, code; uint32_t tick, id, value;
     uint64_t ns; Task task; Frame frame; char text[192];

@@ -28,6 +28,12 @@ en esta prueba; el runtime ESP-IDF se comprueba por separado en sus módulos pur
   heartbeat intercalado con eventos viejos, TICK_LOST y motivos de esporádicas.
 - `test_pico.cpp`: criticidad int32, NUL/overflow, inserción local conservando
   progreso, primera liberación y rechazo de segunda esporádica/ID duplicado.
+- `test_jobs.cpp`, compilado contra cada núcleo: trabajos periódicos y
+  esporádicos solapados, FIFO en RMS/EDF, plazo grande agregado después del
+  tick cero, vuelta del contador de 32 bits, capacidad y vencimientos en lote.
+- El reporte comprueba latencias y Gantt de dos trabajos solapados del mismo
+  ID. La integración verifica que un intento duplicado se registra aparte y
+  la tarea original continúa ejecutándose con sus parámetros.
 - Cuatro suites originales `ESP_RT_Timer/host_tests/*_test.cpp`: núcleo RMS/EDF,
   parser, cola y reporte de tick. Se incluye la criticidad negativa en el parser.
 - `integration.py`: comandos del firmware nativo, tabla vacía, heartbeat sin

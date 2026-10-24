@@ -209,7 +209,7 @@ static void manual_add(Host *h,const char *line) {
         return;
     }
     for(size_t i=0;i<h->ids_count;i++)if(h->ids[i].id==t.id) {
-        log_task(h,-1,&t,3,"RECHAZADA: id duplicado en la sesión");
+        log_task(h,-1,&t,TASK_ATTEMPT_REJECTED,"RECHAZADA: id duplicado en la sesión; tarea original conservada");
         return;
     }
     if(h->ids_count==TASK_CAP) {

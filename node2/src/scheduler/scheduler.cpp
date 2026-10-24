@@ -31,12 +31,20 @@ bool Scheduler::configure(const Task *tasks, size_t count, uint32_t ut_per_tick)
         return false;
     }
 
-    // un período en 0 liberaría trabajos en cada tick para siempre
+    if (count && !tasks) return false;
+    uint64_t reserved = 0;
     for (size_t i = 0; i < count; i++) {
-        if (tasks[i].T == 0) {
-            return false;
-        }
+        const Task &t = tasks[i];
+        if (!t.id || t.id > RT_MAX_TASK_ID || !t.W || !t.T || !t.D ||
+            (t.type != TaskType::Periodic && t.type != TaskType::Sporadic)) return false;
+        for (size_t j = 0; j < i; ++j)
+            if (tasks[j].id == t.id || (t.type == TaskType::Sporadic &&
+                tasks[j].type == TaskType::Sporadic)) return false;
+        reserved += rt_job_reservation(t.T, t.D);
     }
+    if (reserved > RT_MAX_JOBS) return false;
+    jobs_.clear();
+    clock_ = RtClock{};
 
     for (size_t i = 0; i < count; i++) {
         states_[i].task = tasks[i];
@@ -70,14 +78,19 @@ bool Scheduler::add_task(const Task &task, uint32_t first_tick){
             return false;
         }
     }
+    uint64_t reserved = rt_job_reservation(task.T, task.D);
+    for (size_t i = 0; i < count_; ++i)
+        reserved += rt_job_reservation(states_[i].task.T, states_[i].task.D);
+    if (reserved > RT_MAX_JOBS) return false;
     TaskState &state = states_[count_++];
     state = TaskState{};
     state.task = task;
-    state.next_release = first_tick;
+    state.next_release = clock_.peek(first_tick);
     return true;
 }
 
-TickDecision Scheduler::tick(uint32_t now){
+TickDecision Scheduler::tick(uint32_t raw_tick){
+    const uint64_t now = clock_.observe(raw_tick);
     TickDecision decision;
     decision.task_id = NO_TASK;
     decision.units = 0;
@@ -86,20 +99,13 @@ TickDecision Scheduler::tick(uint32_t now){
     decision.released_count = 0;
     decision.event_count = 0;
 
-    // Abortar las tareas que llegaron a su plazo sin terminar.
-    for (size_t i = 0; i < count_; i++) {
-        TaskState &state = states_[i];
-
-        if (!state.pending ||
-            now < state.deadline) {
-            continue;
-        }
-
-        state.pending = false;
-        state.remaining = 0;
-        decision.missed[decision.missed_count] = state.task.id;
-        decision.missed_count++;
-        add_event(decision, EventType::Miss, now, state.task.id, state.job_seq);
+    // Cada trabajo vence por su propio plazo, aunque haya otros del mismo ID.
+    for (auto &job : jobs_.jobs) {
+        if (!job.active || now < job.deadline) continue;
+        const Task &task = states_[job.slot].task;
+        job.active = false;
+        decision.missed[decision.missed_count++] = task.id;
+        add_event(decision, EventType::Miss, raw_tick, task.id, job.sequence);
     }
 
     // Liberar las tareas periódicas que tocan en este tick
@@ -115,9 +121,7 @@ TickDecision Scheduler::tick(uint32_t now){
 
         // la próxima liberación mantiene la fase: si se saltaron ticks,
         // se avanza de a T hasta pasar el tick actual
-        do {
-            state.next_release += state.task.T;
-        } while (state.next_release <= now);
+        state.next_release += ((now - state.next_release) / state.task.T + 1) * state.task.T;
     }
 
     // Pulsaciones de la tarea esporádica (después de las periódicas)
@@ -128,9 +132,11 @@ TickDecision Scheduler::tick(uint32_t now){
     for (size_t i = 0; i < count_; i++) {
         TaskState &state = states_[i];
 
-        if (!state.pending) {
-            continue;
-        }
+        RtJob *head = jobs_.first(i);
+        state.pending = head != nullptr;
+        if (!head) continue;
+        state.remaining = head->remaining;
+        state.deadline = head->deadline;
         if (chosen == nullptr ||
             has_priority(state, *chosen)) {
             chosen = &state;
@@ -140,7 +146,7 @@ TickDecision Scheduler::tick(uint32_t now){
     // si cambia la tarea en ejecución se avisa (arg = la anterior)
     const uint32_t chosen_id = (chosen != nullptr) ? chosen->task.id : NO_TASK;
     if (chosen_id != running_id_) {
-        add_event(decision, EventType::Switch, now, chosen_id, running_id_);
+        add_event(decision, EventType::Switch, raw_tick, chosen_id, running_id_);
         running_id_ = chosen_id;
     }
 
@@ -149,21 +155,24 @@ TickDecision Scheduler::tick(uint32_t now){
         return decision;
     }
 
-    // Ejecutar un tick de trabajo 
+    // Los trabajos de un mismo ID se ejecutan en orden de liberación.
+    RtJob *job = jobs_.first((size_t)(chosen - states_));
     uint32_t units = ut_per_tick_;
     if (chosen->remaining < units) {
         units = chosen->remaining;
     }
     chosen->remaining -= units;
+    job->remaining -= units;
 
     decision.task_id = chosen->task.id;
     decision.units = units;
 
     // terminó: la marca es el final de este tick
     if (chosen->remaining == 0) {
-        chosen->pending = false;
+        job->active = false;
+        chosen->pending = jobs_.first((size_t)(chosen - states_)) != nullptr;
         decision.completed = true;
-        add_event(decision, EventType::Complete, now + 1, chosen->task.id, chosen->job_seq);
+        add_event(decision, EventType::Complete, raw_tick + 1, chosen->task.id, job->sequence);
     }
 
     return decision;
@@ -192,27 +201,17 @@ uint32_t Scheduler::sporadic_ignored() const{
     return sporadic_ignored_;
 }
 
-void Scheduler::release_job(TaskState &state, uint32_t now, TickDecision &decision){
-    // la tarea anterior sigue sin terminar (con D > T o una esporádica
-    // liberada de nuevo) y no se mantienen dos a la vez: se aborta
-    if (state.pending) {
-        decision.missed[decision.missed_count] = state.task.id;
-        decision.missed_count++;
-        add_event(decision, EventType::Miss, now, state.task.id, state.job_seq);
-    }
-
+void Scheduler::release_job(TaskState &state, uint64_t now, TickDecision &decision){
+    RtJob *job = jobs_.push((size_t)(&state - states_), state.job_seq + 1,
+                            now, state.task.D, state.task.W);
+    if (!job) return; // La reserva de la tabla se comprobó antes de desplegar.
     state.job_seq++;
-    state.pending = true;
-    state.remaining = state.task.W;
-    state.deadline = now + state.task.D;
     state.release_tick = now;
-
-    decision.released[decision.released_count] = state.task.id;
-    decision.released_count++;
-    add_event(decision, EventType::Release, now, state.task.id, state.job_seq);
+    decision.released[decision.released_count++] = state.task.id;
+    add_event(decision, EventType::Release, (uint32_t)now, state.task.id, state.job_seq);
 }
 
-void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
+void Scheduler::handle_presses(uint64_t now, TickDecision &decision){
     if (pending_presses_ == 0) {
         return;
     }
@@ -236,7 +235,7 @@ void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
         if (sporadic == nullptr) {
             sporadic_ignored_++;
             if (with_event) {
-                add_event(decision, EventType::SporadicIgnored, now, NO_TASK, SCHED_IGNORED_NO_TASK);
+                add_event(decision, EventType::SporadicIgnored, (uint32_t)now, NO_TASK, SCHED_IGNORED_NO_TASK);
             }
             continue;
         }
@@ -251,7 +250,7 @@ void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
         } else {
             sporadic_ignored_++;
             if (with_event) {
-                add_event(decision, EventType::SporadicIgnored, now, sporadic->task.id, SCHED_IGNORED_MIN_INTERVAL);
+                add_event(decision, EventType::SporadicIgnored, (uint32_t)now, sporadic->task.id, SCHED_IGNORED_MIN_INTERVAL);
             }
         }
     }

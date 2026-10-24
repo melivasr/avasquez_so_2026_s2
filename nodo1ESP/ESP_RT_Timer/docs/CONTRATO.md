@@ -7,6 +7,13 @@
 > comprobación con placa. Estos cambios no forman parte de los resultados por
 > cable históricos de abajo y requieren cargar el firmware actualizado.
 > Las menciones a formatos pendientes reflejan ese historial anterior.
+>
+> **Calendarizador actualizado:** los trabajos solapados se conservan FIFO,
+> con plazos internos de 64 bits. Ya no se aborta un trabajo porque llegue el
+> siguiente. Hay 64 registros por nodo y se valida `sum(ceil(D/T) + 1) <= 64`
+> antes de aceptar tareas. Las menciones históricas a abortar con D > T no
+> describen el comportamiento actual. Estas correcciones requieren recargar
+> ambos firmwares; están verificadas con pruebas nativas y compilación SDK.
 
 # README_NODO — Nodo ESP32 (contrato serial para el host)
 

@@ -147,6 +147,7 @@ static bool process_deploy(const Frame &frame)
         return false;
     }
 
+    if (!rt_jobs_fit(pending_tasks, count)) return false;
     memcpy(deployed_tasks, pending_tasks, count * sizeof(Task));
     deployed_count = count;
 
@@ -270,6 +271,11 @@ static void process_add_task(const Frame &frame)
             send_ack(MessageType::AddTask, NODE_REJECTED);
             return;
         }
+    }
+
+    if (!rt_jobs_fit(deployed_tasks, deployed_count, &task)) {
+        send_ack(MessageType::AddTask, NODE_REJECTED);
+        return;
     }
 
     // En ejecución, primero el calendarizador; la tabla del hilo UART solo

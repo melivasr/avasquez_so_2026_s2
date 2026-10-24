@@ -30,6 +30,15 @@ int main(void) {
     event(s,RT_TASK_ADDED,6,1,1);       /* No es SporadicIgnored. */
     event(s,RT_TICK_LOST,9,0,2);
     event(s,RT_RELEASE,9,1,3); event(s,RT_SWITCH,9,1,0); event(s,RT_COMPLETE,10,1,3);
+    Record overlap={.kind=R_TASK,.node=0,.code=1,.value=4,
+                    .task={.id=2,.type='P',.W=40,.T=3,.D=10}};
+    assert(queue_push(&s->events,&overlap,0)==0);
+    event(s,RT_RELEASE,12,2,1); event(s,RT_SWITCH,12,2,1);
+    event(s,RT_RELEASE,14,2,2); /* El trabajo 1 todavía está ejecutándose. */
+    Record duplicate={.kind=R_TASK,.node=-1,.code=TASK_ATTEMPT_REJECTED,
+                      .task={.id=2,.type='P',.W=999,.T=1,.D=1}};
+    assert(queue_push(&s->events,&duplicate,0)==0);
+    event(s,RT_COMPLETE,16,2,1); event(s,RT_COMPLETE,20,2,2);
     Record stop={.kind=R_STOP,.node=0},end={.kind=R_END};
     assert(queue_push(&s->events,&stop,0)==0 && queue_push(&s->events,&end,0)==0);
     assert(report_run(s,&config)==0);
@@ -37,16 +46,20 @@ int main(void) {
     snprintf(path,sizeof path,"%s/gantt.csv",directory);
     FILE *f=fopen(path,"r"); assert(f);
     assert(fgets(line,sizeof line,f));
-    const char *expected[]={"0,1,0,2\n","0,1,2,4\n","0,1,9,10\n"};
-    for(size_t i=0;i<3;i++)assert(fgets(line,sizeof line,f) && !strcmp(line,expected[i]));
+    const char *expected[]={"0,1,0,2\n","0,1,2,4\n","0,1,9,10\n",
+                            "0,2,12,14\n","0,2,14,16\n","0,2,16,20\n"};
+    for(size_t i=0;i<sizeof expected/sizeof *expected;i++)assert(fgets(line,sizeof line,f) && !strcmp(line,expected[i]));
     assert(!fgets(line,sizeof line,f)); fclose(f);
     snprintf(path,sizeof path,"%s/tasks.csv",directory);
     f=fopen(path,"r"); assert(f); assert(fgets(line,sizeof line,f));
     assert(fgets(line,sizeof line,f));
-    assert(strstr(line,",3,5,3,0,1,3,0.000,3,1.667")); fclose(f);
+    assert(strstr(line,",3,5,3,0,1,3,0.000,3,1.667"));
+    assert(fgets(line,sizeof line,f));
+    assert(!strcmp(line,"0,2,P,40,3,10,0,4,2,8,2,0,0,2,1.000,2,5.000,6\n"));
+    fclose(f);
     const char *files[]={"gantt.csv","events.csv","tasks.csv","report.html"};
     for(size_t i=0;i<4;i++) { snprintf(path,sizeof path,"%s/%s",directory,files[i]); unlink(path); }
     rmdir(directory); queue_destroy(&s->events); sem_destroy(&s->lock); free(s);
-    puts("Reporte: SWITCH, trabajos consecutivos, heartbeat intercalado y ticks perdidos correctos");
+    puts("Reporte: Gantt, trabajos solapados, latencias, duplicados y ticks perdidos correctos");
     return 0;
 }

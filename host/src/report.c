@@ -6,13 +6,20 @@
 #include <sys/stat.h>
 #include <unistd.h>
 typedef struct {
+    uint64_t release;
+    uint32_t sequence;
+    bool first;
+} JobStat;
+typedef struct {
     uint32_t id;
     int node;
     Task task;
     uint64_t releases,runs,completed,misses,ignored;
-    uint64_t first_sum,finish_sum,first_n,finish_n,finish_max,release;
-    bool active,first,ambiguous,confirmed;
-    uint32_t cost,job;
+    uint64_t first_sum,finish_sum,first_n,finish_n,finish_max;
+    bool confirmed;
+    uint32_t cost;
+    JobStat jobs[RT_MAX_JOBS];
+    size_t pending;
 } Stat;
 static FILE *open_output(const Config *c,const char *name) {
     char path[1100];
@@ -65,16 +72,17 @@ static void advance_trace(Trace *trace,uint64_t until,int node,Stat *stats,size_
     if(until<=trace->cursor)return;
     if(trace->valid && trace->selected) {
         Stat *st=find_stat(stats,n,trace->selected,node);
-        if(st && st->active) {
+        if(st && st->pending) {
+            JobStat *job=&st->jobs[0]; /* FIFO dentro de una misma tarea. */
             fprintf(gantt,"%d,%"PRIu32",%"PRIu64",%"PRIu64"\n",
                     node,st->id,trace->cursor,until);
             uint64_t duration=until-trace->cursor;
             *busy+=duration;
             st->runs+=duration;
-            if(!st->first && !st->ambiguous && trace->cursor>=st->release) {
-                st->first_sum+=trace->cursor-st->release;
+            if(!job->first && trace->cursor>=job->release) {
+                st->first_sum+=trace->cursor-job->release;
                 st->first_n++;
-                st->first=true;
+                job->first=true;
             }
         } else if(!st)*incomplete=true;
     }
@@ -147,7 +155,7 @@ static const char *const PAGE_HEAD[]= {
 static const char *const PAGE_SCRIPT[]= {
     "(function(){\n",
     "'use strict';\n",
-    "const STATE={0:['…','Admitida (pendiente)',''],1:['✓','Aceptada','ok'],2:['↺','Retirada','bad'],3:['✕','Rechazada','bad'],4:['?','Incierta','bad']};\n",
+    "const STATE={0:['…','Admitida (pendiente)',''],1:['✓','Aceptada','ok'],2:['↺','Retirada','bad'],3:['✕','Rechazada','bad'],4:['?','Incierta','bad'],5:['✕','Intento de alta rechazado','bad']};\n",
     "const SPANS=[20,50,100,200,500,1000,5000,0];\n",
     "const DENSE=1500;\n",
     "const NS='http://www.w3.org/2000/svg';\n",
@@ -280,12 +288,12 @@ static const char *const PAGE_SCRIPT[]= {
     "  [['Nodo'],['Tarea esporádica'],['Liberaciones'],['Latencia 1ª ejecución'],['Respuesta media'],['Respuesta máx.'],['Fallas de plazo'],['Ignoradas: intervalo mínimo'],['Ignoradas: nodo sin esporádica'],['Ignoradas según contador del nodo'],['Sin evento']],pr),\n",
     "  H('p','muted','Cada nodo admite como máximo una esporádica, liberada por el botón de ese nodo (o por trigger desde el host). Una pulsación antes de T ticks desde la última liberación aceptada se ignora y se cuenta; si el nodo no tiene esporádica asignada, la pulsación también se ignora. Latencias en ticks del nodo: 1ª ejecución = inicio − liberación; respuesta = finalización − liberación. «Sin evento» = ignoradas que el nodo contó pero cuyo evento no llegó (más de 8 por tick o cola llena).'));\n",
     "\n",
-    "const last=new Map();for(const d of R.dec)last.set(d.id,d);\n",
+    "const last=new Map();for(const d of R.dec)if(d.k!==5)last.set(d.id,d);\n",
     "const t0=R.dec.length?R.dec[0].ns:0;\n",
     "const finals=[...last.values()].sort(function(p,q){return p.id-q.id;});\n",
     "const nAcc=finals.filter(function(d){return d.k===1;}).length,nRej=finals.filter(function(d){return d.k===3;}).length;\n",
     "const adm=document.getElementById('admit');\n",
-    "adm.append(H('p',null,nAcc+' aceptada(s) · '+nRej+' rechazada(s) · '+(finals.length-nAcc-nRej)+' en otro estado. Estado final de cada tarea:'),\n",
+    "adm.append(H('p',null,nAcc+' aceptada(s) · '+nRej+' rechazada(s) · '+(finals.length-nAcc-nRej)+' en otro estado · '+R.dec.filter(d=>d.k===5).length+' intento(s) de alta rechazado(s). Estado final de cada tarea:'),\n",
     "  table([['Tarea'],['Tipo'],['W'],['T'],['D'],['Criticidad'],['Nodo'],['Estado','l'],['Motivo','why']],\n",
     "    finals.map(function(d){return ['T'+d.id,d.ty==='S'?'Esporádica':'Periódica',d.W,d.T,d.D,d.cr,d.n<0?'—':R.nodes[d.n],badge(d.k),d.why];})));\n",
     "const det=adm.appendChild(H('details'));det.appendChild(H('summary',null,'Historial completo de decisiones ('+R.dec.length+')'));\n",
@@ -502,23 +510,26 @@ int report_run(Shared *s,const Config *c) {
         }
         if(r.code==RT_RELEASE) {
             st->releases++;
-            st->ambiguous=st->active;
-            st->release=r.tick;
-            st->job=r.value;
-            st->active=true;
-            st->first=false;
-        } else if(r.code==RT_COMPLETE) {
-            st->completed++;
-            if(st->active && st->job==r.value && !st->ambiguous && r.tick>=st->release) {
-                uint64_t response=r.tick-st->release;
-                st->finish_sum+=response;
-                st->finish_n++;
-                if(response>st->finish_max)st->finish_max=response;
+            if(st->pending==RT_MAX_JOBS) {
+                incomplete[node]=true;
+                trace->valid=false;
+                st->pending=0; /* Pérdidas previas: evitar acumulación de trabajos huérfanos. */
             }
-            st->active=false;
-        } else if(r.code==RT_MISS) {
-            st->misses++;
-            st->active=false;
+            st->jobs[st->pending++]=(JobStat){.release=r.tick,.sequence=r.value};
+        } else if(r.code==RT_COMPLETE || r.code==RT_MISS) {
+            if(r.code==RT_COMPLETE)st->completed++;
+            else st->misses++;
+            for(size_t j=0;j<st->pending;j++)if(st->jobs[j].sequence==r.value) {
+                if(r.code==RT_COMPLETE && r.tick>=st->jobs[j].release) {
+                    uint64_t response=r.tick-st->jobs[j].release;
+                    st->finish_sum+=response;
+                    st->finish_n++;
+                    if(response>st->finish_max)st->finish_max=response;
+                }
+                memmove(st->jobs+j,st->jobs+j+1,(st->pending-j-1)*sizeof *st->jobs);
+                st->pending--;
+                break;
+            }
         } else if(r.code==RT_SPORADIC_IGNORED)st->ignored++;
     }
     uint64_t dropped[3]= {

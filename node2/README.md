@@ -3,6 +3,9 @@
 Firmware C++ con núcleo arduino-pico sobre Pico SDK, sin calendarización RTOS.
 El timer de hardware marca ticks; el calendarizador local ejecuta RMS o EDF.
 Incluye calibración, ocho tareas, una esporádica, botón, LEDs y cola de eventos.
+Conserva trabajos solapados FIFO y calcula plazos con tiempo interno de 64 bits.
+La capacidad de 64 trabajos se valida antes de configurar o insertar tareas:
+`sum(ceil(D/T) + 1) <= 64`, con margen para ticks perdidos.
 
 Comparte el [protocolo serial](../host/docs/PROTOCOL.md) con host y ESP32.
 ADD_TASK (0x0A) agrega tareas entre ticks sin reiniciar el reloj ni los trabajos.

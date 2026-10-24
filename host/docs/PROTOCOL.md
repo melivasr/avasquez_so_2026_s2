@@ -51,6 +51,15 @@ Formato ASCII `id,tipo,W,T,D,criticidad`, separado por comas, sin NUL:
 - Máximo ocho tareas por nodo y una esporádica.
 - El host elimina CR/LF del CSV de entrada y transmite líneas con LF.
 
+Los dos firmwares conservan trabajos solapados de una tarea en orden FIFO;
+solo un plazo efectivamente vencido produce MISS. Los plazos y próximas
+liberaciones se calculan con tiempo interno de 64 bits, sin truncar `tick + D`.
+La marca de tiempo de la trama conserva sus 32 bits bajos.
+Hay 64 registros de trabajos por nodo, reservados sin heap durante ejecución.
+Se exige `sum(ceil(D/T) + 1) <= 64`: incluye margen de una liberación por tarea
+tras ticks perdidos. Host y nodos rechazan tablas/inserciones que excedan esta
+capacidad; una liberación normal nunca reemplaza un trabajo pendiente.
+
 Secuencia: CAL_REQ/CAL_RESP → DEPLOY/ACK → START/ACK. El host envía DEPLOY
 incluso al nodo sin tareas para borrar una tabla conservada de una sesión anterior.
 Calibración y reemplazo de tabla se rechazan durante la ejecución. Una placa

@@ -64,7 +64,10 @@ const char *admission(const Node *n,const Task *t,Algorithm a) {
     long double u=node_util(n)+(long double)task_cost(t->W,n->speed)/t->T;
     long double count=(long double)(n->count+1);
     long double bound=a==EDF?1:count*expm1l(logl(2)/count);
-    return (a==EDF?edf_exact(n,t):u<=bound)?NULL:"utilización excede límite de admisión";
+    if(!(a==EDF?edf_exact(n,t):u<=bound))return "utilización excede límite de admisión";
+    uint64_t jobs=rt_job_reservation(t->T,t->D);
+    for(size_t i=0;i<n->count;i++)jobs+=rt_job_reservation(n->tasks[i].T,n->tasks[i].D);
+    return jobs<=RT_MAX_JOBS?NULL:"capacidad de trabajos pendientes (64 por nodo)";
 }
 
 int place(Node nodes[NODES],const Task *t,Algorithm a,Heuristic h,char *err,size_t len) {
