@@ -1,7 +1,5 @@
 # host: compilación, reportes y caché de Python
 /host/**/build/
-/host/**/report/
-/host/report_experiment_*/
 /host/**/__pycache__/
 /host/**/*.pyc
 
