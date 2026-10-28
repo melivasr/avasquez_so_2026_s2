@@ -7,11 +7,16 @@
 // ut.h no tiene extern "C" y no se puede modificar.
 extern "C" void unidad_trabajo(void);
 
+// Cuántos ticks dura la medición. Más ticks dan un promedio más estable pero
+// una calibración más larga (con tick de 10 ms son ~0,5 s).
 static constexpr uint32_t CAL_WINDOW_TICKS = 50;
+// Porcentaje del cómputo medido que se declara como disponible. El resto queda
+// de margen para el calendarizador, el envío de eventos y la UART.
 static constexpr uint32_t CAL_MARGIN_PERCENT = 80;
 
 static volatile uint32_t cal_ticks = 0;
 
+// La ISR solo cuenta ticks; todo lo demás pasa en el ciclo de medición.
 static bool IRAM_ATTR on_cal_alarm(
     gptimer_handle_t timer,
     const gptimer_alarm_event_data_t *edata,
@@ -24,6 +29,13 @@ static bool IRAM_ATTR on_cal_alarm(
     return false;
 }
 
+// Mide cuántas unidades de trabajo (UT) caben en un tick, o devuelve 0 si algo
+// falla. Corre unidad_trabajo() sin parar durante CAL_WINDOW_TICKS ticks de un
+// temporizador de hardware y cuenta cuántas veces la ejecutó.
+//
+// Ese ciclo no es una espera para temporizar nada: es la medición misma (el
+// reloj lo da el temporizador, el ciclo solo carga la CPU como lo hará una
+// tarea real).
 uint32_t calibration_measure(uint32_t tick_us)
 {
     gptimer_handle_t timer = nullptr;
@@ -62,6 +74,8 @@ uint32_t calibration_measure(uint32_t tick_us)
 
             gptimer_stop(timer);
 
+            // UT por tick = ut_count / ticks de la ventana, y de eso solo se
+            // declara el porcentaje de margen. Se redondea hacia abajo.
             result = static_cast<uint32_t>(
                 (ut_count * CAL_MARGIN_PERCENT) /
                 (100ULL * CAL_WINDOW_TICKS));

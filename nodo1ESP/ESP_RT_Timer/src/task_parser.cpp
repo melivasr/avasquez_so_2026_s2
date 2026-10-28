@@ -1,3 +1,9 @@
+// Parser de una línea de tarea: id,tipo,W,T,D,criticidad
+// Ejemplo: 3,P,40,20,20,2
+//
+// Es estricto a propósito: exactamente 6 campos, una sola coma entre ellos,
+// sin espacios ni signos (salvo la criticidad, que puede ser negativa).
+// Cualquier cosa rara se rechaza en lugar de interpretarse.
 
 #include "lib/task_parser.h"
 
@@ -7,6 +13,8 @@
 #include <errno.h>
 #include <limits.h>
 
+// Entero decimal sin signo de 32 bits. Se revisa dígito por dígito antes de
+// strtoul porque este acepta espacios y signos al inicio.
 static bool parse_uint(const char *text, uint32_t *out)
 {
     if (text == nullptr || *text == '\0') {
@@ -31,6 +39,7 @@ static bool parse_uint(const char *text, uint32_t *out)
     return true;
 }
 
+// Criticidad: entero con signo de 32 bits; solo se admite un '-' al inicio.
 static bool parse_criticality(const char *text, int32_t *out)
 {
     const char *digits = text;
@@ -46,9 +55,10 @@ static bool parse_criticality(const char *text, int32_t *out)
     return true;
 }
 
-// Divide 'buffer' (modificable) en exactamente 6 campos separados por ','.
-// A diferencia de strtok, no colapsa comas: un campo vacío falla en parse_uint
-// o en la comparación del tipo, y una coma de más falla aquí.
+// Divide 'buffer' (que se modifica) en exactamente 6 campos separados por ','.
+// No se usa strtok porque este junta las comas seguidas y dejaría pasar
+// campos vacíos. Aquí un campo vacío falla después en parse_uint o en la
+// comparación del tipo, y una coma de más falla en esta función.
 static bool split_fields(char *buffer, char *fields[6])
 {
     char *p = buffer;
@@ -67,12 +77,15 @@ static bool split_fields(char *buffer, char *fields[6])
     return true;
 }
 
+// Convierte una línea en una Task. Solo escribe en 'out' si toda la línea es
+// válida.
 bool parse_task_line(const char *line, Task *out)
 {
     if (line == nullptr || out == nullptr) {
         return false;
     }
 
+    // 95 caracteres como máximo más el terminador.
     char buffer[96];
 
     size_t len = strlen(line);
@@ -80,6 +93,7 @@ bool parse_task_line(const char *line, Task *out)
         return false;
     }
 
+    // Se trabaja sobre una copia porque split_fields escribe en el texto.
     memcpy(buffer, line, len + 1);
 
     char *fields[6];
@@ -89,6 +103,7 @@ bool parse_task_line(const char *line, Task *out)
 
     Task candidate = {};
 
+    // Orden de los campos: id, tipo, W, T, D, criticidad (el tipo se ve abajo).
     if (!parse_uint(fields[0], &candidate.id) ||
         !parse_uint(fields[2], &candidate.W) ||
         !parse_uint(fields[3], &candidate.T) ||
@@ -97,6 +112,7 @@ bool parse_task_line(const char *line, Task *out)
         return false;
     }
 
+    // Ninguno de estos puede ser cero (id 0 se reserva para "ocioso").
     if (candidate.id == 0 ||
         candidate.W == 0 ||
         candidate.T == 0 ||
@@ -112,6 +128,7 @@ bool parse_task_line(const char *line, Task *out)
         return false;
     }
 
+    // Estado de ejecución inicial; el calendarizador lo completa.
     candidate.remaining = 0;
     candidate.next_release = 0;
     candidate.absolute_deadline = 0;
