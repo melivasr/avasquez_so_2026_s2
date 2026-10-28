@@ -13,6 +13,7 @@ extern "C" {
 #define CAL_WINDOW_TICKS 50U
 #define CAL_MARGIN_PERCENT 80U
 
+// Corre UT durante CAL_WINDOW_TICKS ticks y devuelve las UT por tick con margen
 uint32_t calibration_measure(uint32_t tick_us){
     // con tick de 1 s la ventana es de 50 s: todavía cabe en 32 bits
     const uint32_t window_us = tick_us * CAL_WINDOW_TICKS;

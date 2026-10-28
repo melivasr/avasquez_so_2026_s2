@@ -8,27 +8,29 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../../../common/rt_protocol.h"
 
 #include "task.h"
 #include "task_parser.h"   // MAX_TASKS
+#include "../../../../common/rt_jobs.h"
 
 // Límite de id acordado en el diseño (cabe en 16 bits en los eventos).
-constexpr uint32_t SCHED_MAX_TASK_ID = 65535;
+constexpr uint32_t SCHED_MAX_TASK_ID = RT_MAX_TASK_ID;
 
 enum class Algorithm : uint8_t {
-    RMS = 0,
-    EDF = 1
+    RMS = RT_RMS,
+    EDF = RT_EDF
 };
 
 // Los valores coinciden con la tabla de eventos de README_NODO.md (9.5).
 // Los demás tipos (SporadicIgnored, TaskAdded, TickLost, BadFrame) los
 // emitirán otros módulos en pasos posteriores.
 enum class SchedEventType : uint8_t {
-    Release  = 0x01, // id = tarea, arg = n.º de trabajo
-    Switch   = 0x02, // id = tarea que corre desde este tick (0 = ocioso), arg = anterior
-    Complete = 0x03, // id = tarea, arg = n.º de trabajo (tick = fin del último tramo)
-    Miss     = 0x04, // id = tarea, arg = n.º de trabajo abortado
-    SporadicIgnored = 0x05 // id = tarea esporádica (0 si no hay), arg = motivo SCHED_IGNORED_*
+    Release  = RT_RELEASE, // id = tarea, arg = n.º de trabajo
+    Switch   = RT_SWITCH, // id = tarea que corre desde este tick (0 = ocioso), arg = anterior
+    Complete = RT_COMPLETE, // id = tarea, arg = n.º de trabajo (tick = fin del último tramo)
+    Miss     = RT_MISS, // id = tarea, arg = n.º de trabajo abortado
+    SporadicIgnored = RT_SPORADIC_IGNORED // id = tarea esporádica (0 si no hay), arg = motivo SCHED_IGNORED_*
 };
 
 // Motivos de SporadicIgnored (campo arg).
@@ -54,11 +56,13 @@ struct SchedSlot {
     Task task;
     uint32_t cost_ticks;   // C = ceil(W / sn)
     uint32_t job_seq;      // n.º del trabajo más reciente (empieza en 1)
-    uint32_t release_tick; // tick de liberación del trabajo activo
+    uint64_t release_tick; // última liberación (intervalo mínimo de la esporádica)
 };
 
 struct Scheduler {
     SchedSlot slots[MAX_TASKS];
+    RtJobs jobs;
+    RtClock clock;
     size_t count;
     Algorithm algorithm;
     uint32_t ut_per_tick;  // sn de la calibración

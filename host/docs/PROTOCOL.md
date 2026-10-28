@@ -1,168 +1,165 @@
-# Protocolo e integración
+# Protocolo serial compartido
 
-## Auditoría del repositorio
+Este contrato corresponde al código del host, ESP32 y Pico. Los códigos y
+los tamaños se definen en [`common/rt_protocol.h`](../../common/rt_protocol.h).
+Los tres componentes deben compilarse desde el mismo checkout del repositorio.
+La documentación histórica del ESP32 conserva resultados de pruebas anteriores;
+los cambios descritos aquí requieren cargar el firmware actualizado.
 
-ESP32 usa PlatformIO, ESP-IDF, placa esp32dev y UART0 a 115200 (TX1/RX3).
-`app_main` llama `serial_receiver_run`. Hay calibración GPTimer de 50 ticks con
-margen del 80 %, recepción parcial con timeout, CRC y parser de tareas CSV.
-DEPLOY valida hasta ocho tareas y reemplaza su tabla completa; todavía no hay
-calendarizador conectado a esa tabla. START/STOP/EVENT/TICK/SPORADIC/CONFIGURE/
-ADD_TASK no están implementados y reciben ACK estado 2 cuando llegan como orden.
-`timer_run_test` es un ensayo separado, no el calendarizador requerido.
-
-Pico usa PlatformIO raspberrypi, framework arduino, board pico (también hay un
-env nanorp2040connect). Es un RP2040, sin Linux. Existen encode/decode, CRC,
-FrameReceiver y EventQueue de 64 entradas con los ocho códigos de evento.
-El main todavía parpadea un LED con delay; no conecta esos módulos al USB ni
-implementa calibración, tareas, temporizador local o botón. No se cambió su BSP.
-
-Los dos codecs ya coinciden en marca, tipos 1..9, límites y CRC. Las pruebas
-`interop_esp`/`interop_pico` compilan sus implementaciones originales y verifican
-compatibilidad binaria con C del host. No prueban el SDK ni firmware completo.
-
-## Trama existente, preservada
+## Trama
 
 ```text
 A5 5A | tipo:u8 | longitud:u16 LE | payload[longitud] | CRC:u16 LE
 ```
 
-Carga máxima 512; trama máxima 519 bytes. CRC-16/CCITT-FALSE: polinomio 0x1021,
-inicial 0xFFFF, no reflejado, xorout 0. Cubre tipo, ambos bytes de longitud y
-payload; excluye marca y CRC. Vector «123456789» = 0x29B1.
-Todos los enteros multibyte viajan little-endian. Nunca se serializa un struct
-C/C++ por memcpy: puede contener padding. CSV viaja ASCII, sin NUL.
+Carga máxima 512 bytes; trama máxima 519 bytes. CRC-16/CCITT-FALSE, polinomio
+0x1021, inicial 0xFFFF, sin reflexión ni XOR final. Cubre tipo, longitud y carga;
+excluye marca y CRC. Vector `123456789`: 0x29B1. Los enteros multibyte viajan
+little-endian y se codifican campo por campo. USB/UART a 115200, 8N1.
 
-## Cargas y contrato v1
+## Mensajes
 
-Las filas marcadas «existente» reflejan firmware efectivo. Las demás fijan el
-contrato **pendiente de implementar en los nodos** para interoperar con el host.
-Se preserva la codificación existente de DEPLOY y calibración. Las extensiones
-CONFIGURE/ADD_TASK ocupan tipos nuevos porque DEPLOY ya significa reemplazo.
+| Tipo | Mensaje | Carga |
+|---|---|---|
+| 0x01 | CAL_REQ, host → nodo | tick_us:u32, rango 1000..1000000 |
+| 0x02 | CAL_RESP, nodo → host | s_n:u32 positivo, con margen ya aplicado |
+| 0x03 | DEPLOY, host → nodo | 0..8 líneas CSV; carga vacía borra toda la tabla |
+| 0x04 | START, host → nodo | algoritmo:u8 (RMS=0, EDF=1), report_ticks:u16 |
+| 0x05 | EVENT, nodo → host | cantidad:u8, seguida de 1..56 registros de 9 bytes |
+| 0x06 | TICK_REPORT, nodo → host | 22 bytes, formato abajo |
+| 0x07 | SPORADIC, host → nodo | vacía; solicita la única esporádica del nodo |
+| 0x08 | STOP, host → nodo | vacía |
+| 0x09 | ACK, nodo → host | tipo_original:u8, estado:u8 |
+| 0x0A | ADD_TASK, host → nodo | una línea CSV, con LF final opcional |
 
-| Tipo | Dirección | Payload exacto | Estado |
-|---|---|---|---|
-| 0x01 CAL_REQ | host→nodo | tick_us:u32 | existente ESP32 |
-| 0x02 CAL_RESP | nodo→host | s_n:u32 positivo, margen ya aplicado | existente ESP32 |
-| 0x03 DEPLOY | host→nodo | 1..8 líneas `id,tipo,W,T,D,criticidad\n` | existente ESP32 |
-| 0x04 START | host→nodo | vacío | pendiente |
-| 0x05 EVENT | nodo→host | tick:u32, tipo_evento:u8, id:u32, valor:u32 = 13 bytes | códigos/estructura existen en Pico; transmisión pendiente |
-| 0x06 TICK | nodo→host | tick:u32 = 4 bytes | pendiente |
-| 0x07 SPORADIC | host→nodo | id:u32 = 4 bytes | pendiente |
-| 0x08 STOP | host→nodo | vacío | pendiente |
-| 0x09 ACK | nodo→host | tipo_original:u8, estado:u8 = 2 bytes | existente ESP32 |
-| 0x0A CONFIGURE | host→nodo | versión:u8=1, algoritmo:u8 (EDF=0,RMS=1), report_ticks:u32 = 6 bytes | extensión pendiente |
-| 0x0B ADD_TASK | host→nodo | exactamente una línea CSV como DEPLOY | extensión pendiente |
+No existe CONFIGURE. Algoritmo y período de reporte se envían en START.
+El enum interno del host tiene otro orden: `start_frame()` realiza la conversión
+explícita al código de la trama.
 
-ACK estado 0=éxito, 1=contenido/estado inválido, 2=orden no implementada.
-El host considera otros estados no cero como rechazo. CAL_RESP es la confirmación
-de calibración; ACK(1,0) solo no reemplaza CAL_RESP. Para las demás órdenes se
-requiere ACK coincidente. Completar write no equivale a desplegar una tarea.
+ACK: 0=aplicada, 1=contenido rechazado, 2=orden no soportada, 3=estado inválido.
+CAL_RESP confirma calibración; en caso de error llega ACK de CAL_REQ con estado
+no cero. Las demás órdenes requieren ACK con el tipo coincidente. Los nodos
+pueden enviar EVENT/TICK_REPORT mientras el host espera la respuesta de una orden.
 
-CONFIGURE debe aceptarse únicamente antes de START, con capacidad local ≥8 y
-sin trabajos activos de una sesión anterior. No reinicia tareas de una sesión
-desconectada. Para iniciar otra sesión después de desconectar host, hacer STOP
-voluntario o reset físico del nodo primero. CONFIRMAR versión 1 significa
-soportar las reglas de este contrato; un nodo legacy se excluye con motivo claro.
-No hay negociación que pretenda que el firmware incompleto ya las satisface.
+## Tareas y ciclo de vida
 
-DEPLOY reemplaza la tabla solo estando detenido. Validación y commit atómicos:
-si una línea falla, no se modifica ninguna tarea. Como máximo una S; IDs únicos.
-Una tabla vacía inicial no se envía: CONFIGURE requiere estado detenido/limpio.
-El host envía W, no C; el nodo calcula C con la misma s_n informada.
+Formato ASCII `id,tipo,W,T,D,criticidad`, separado por comas, sin NUL:
 
-START establece cero exactamente una vez y ACK se envía después de establecerlo.
-A partir de entonces un nodo sin tareas también emite TICK cada report_ticks.
-ADD_TASK agrega atómicamente sin reemplazar tabla, reiniciar cero o tocar estados
-de otros trabajos. La primera liberación periódica será en el siguiente tick
-local. Una S queda esperando evento. El mismo ID con definición idéntica debe
-ser idempotente (sin nueva liberación); con definición distinta se rechaza.
-El host usa IDs únicos por sesión, pero no depende de retransmitir ADD_TASK.
-El parser ESP32 actual usa criticidad uint32; debe aceptar int32 con signo según
-el contrato del host, conservando el resto de campos e interfaz UT.
+- ID de 1 a 65535; 0 identifica CPU ociosa en los eventos.
+- Tipo P o S; W, T y D positivos, uint32.
+- Criticidad int32 con signo. Mayor valor significa mayor criticidad.
+- Máximo ocho tareas por nodo y una esporádica.
+- El host elimina CR/LF del CSV de entrada y transmite líneas con LF.
 
-SPORADIC representa una solicitud de liberación, no un turno de CPU. Botón físico
-y solicitud software pasan por la misma comprobación local de intervalo mínimo.
-ACK confirma recepción/aplicación de esa comprobación; el EVENT correspondiente
-indica Release o SporadicIgnored. El host no hace debounce ni suple interrupciones.
-STOP es idempotente, aborta/detiene trabajos locales y confirma tras hacerlo;
-puede transmitir eventos finales. Desconexión USB/silencio del host no es STOP.
+Los dos firmwares conservan trabajos solapados de una tarea en orden FIFO;
+solo un plazo efectivamente vencido produce MISS. Los plazos y próximas
+liberaciones se calculan con tiempo interno de 64 bits, sin truncar `tick + D`.
+La marca de tiempo de la trama conserva sus 32 bits bajos.
+Hay 64 registros de trabajos por nodo, reservados sin heap durante ejecución.
+Se exige `sum(ceil(D/T) + 1) <= 64`: incluye margen de una liberación por tarea
+tras ticks perdidos. Host y nodos rechazan tablas/inserciones que excedan esta
+capacidad; una liberación normal nunca reemplaza un trabajo pendiente.
+
+Secuencia: CAL_REQ/CAL_RESP → DEPLOY/ACK → START/ACK. El host envía DEPLOY
+incluso al nodo sin tareas para borrar una tabla conservada de una sesión anterior.
+Calibración y reemplazo de tabla se rechazan durante la ejecución. Una placa
+que sigue ejecutándose tras desconectar el host debe recibir STOP voluntario o
+reset físico antes de una sesión nueva. El host no detiene esa sesión al abrir.
+
+START establece tick cero y reinicia contadores. Un nodo sin tareas también
+emite reportes. En firmware, report_ticks=0 desactiva reportes; el host exige
+1..65535 porque los necesita para detectar caídas. START repetido devuelve 3.
+El ACK puede intercalarse con los eventos iniciales; el receptor despacha por tipo.
+
+ADD_TASK valida y agrega sin reiniciar el reloj ni alterar otros trabajos.
+La primera liberación periódica ocurre en el siguiente tick local a procesar;
+una esporádica espera botón/SPORADIC. TASK_ADDED informa la ranura asignada.
+Los IDs duplicados se rechazan; el host no retransmite operaciones cuyo ACK se
+pierde. Las tareas agregadas se conservan después de STOP, hasta otro DEPLOY.
+El host utiliza ADD_TASK tanto para modo manual como para migración.
+
+SPORADIC registra una pulsación. ACK 0 confirma el registro; Release o
+SporadicIgnored informa si el calendarizador la aceptó según T mínimo.
+`trigger ID` del host localiza el nodo por ID y envía una carga vacía.
+Botón físico y debounce permanecen en el nodo.
+
+STOP termina la ejecución y vacía los eventos pendientes antes de ACK 0.
+STOP estando detenido devuelve 3. Tras su ACK no deben llegar más eventos ni
+reportes de esa ejecución. El nodo conserva la tabla. Desconexión o silencio
+del host no equivalen a STOP.
 
 ## Eventos
 
-Se usan los códigos ya definidos en `node2/include/event_queue.h`:
+Carga de EVENT: `[cantidad:u8][registro × cantidad]`. Cada registro:
 
-| Código | Nombre | tick/valor |
+```text
+[tipo:u8][tick:u32 LE][id:u16 LE][arg:u16 LE]
+```
+
+| Código | Evento | Significado de arg |
 |---|---|---|
-| 1 | Release | tick de liberación; valor = plazo absoluto (ticks) |
-| 2 | Run | tick inicial; valor = duración positiva en ticks ejecutados contiguos |
-| 3 | Complete | tick límite de finalización, valor = 0 |
-| 4 | DeadlineMiss | tick del plazo incumplido, valor = plazo absoluto; trabajo abortado |
-| 5 | Idle | tick inicial de idle, id=UINT32_MAX; valor=duración si se conoce |
-| 6 | SporadicIgnored | tick del intento ignorado; id de S; valor = número de intentos ignorados en este evento |
-| 7 | FrameError | tick local; id=UINT32_MAX; valor = errores desde último evento |
-| 8 | EventsLost | tick local; id=UINT32_MAX; valor = registros perdidos desde último aviso |
+| 1 | RELEASE | Número de trabajo, 16 bits bajos |
+| 2 | SWITCH | ID anterior; ID nuevo en el campo id, 0=ocioso |
+| 3 | COMPLETE | Número de trabajo; tick es el final del último tramo |
+| 4 | MISS | Número de trabajo abortado |
+| 5 | SPORADIC_IGNORED | Motivo: 0=intervalo mínimo, 1=no hay esporádica |
+| 6 | TASK_ADDED | Ranura 1..8 |
+| 7 | TICK_LOST | Cantidad de ticks no procesados, saturada a 65535 |
+| 8 | BAD_FRAME | Reservado; ambos firmwares cuentan tramas malas en TICK_REPORT |
 
-RUN describe `[tick,tick+valor)`, ya observado; nunca una predicción de lo que
-correrá. Puede enviarse por tick o agrupado, pero no solaparse ni duplicarse.
-Eventos ordenados por tick dentro de cada nodo; para un trabajo: Release, Run,
-Complete/Miss. La marca de Complete representa el límite posterior a su último
-tick de ejecución. Miss se emite al abortar el trabajo. Reporte toma solo RUN
-para construir el Gantt, rechaza intervalos no positivos/solapados y marca
-la traza incompleta. Los periodos/plazos se conservan en tasks.csv y los plazos
-absolutos en eventos Release/Miss.
+SWITCH en k selecciona la tarea desde [k,k+1). No lleva una duración. El host
+reconstruye intervalos con SWITCH, RELEASE, COMPLETE y MISS. COMPLETE/MISS cierra
+el trabajo aunque no llegue inmediatamente otro SWITCH; trabajos consecutivos
+del mismo ID pueden ejecutarse sin un SWITCH entre ambos. El número de trabajo
+permite correlacionar liberación y finalización, con vuelta cada 65536 trabajos.
 
-La estructura existente no incluye secuencia de telemetría ni ID de trabajo.
-El contrato admite un trabajo activo por ID; si el firmware permite trabajos
-solapados (por ejemplo D>T), necesita extender eventos con ID de trabajo para
-correlación completa. El host acepta D>T y muestra eventos, pero deja sin muestras
-las correlaciones ambiguas; no inventa latencias. Los contadores de la Pico
-son códigos preparados, aún no instrumentados. No se detectan todas las pérdidas
-si firmware no envía EventsLost; se documenta esta limitación.
+Ante TICK_LOST no se dibuja ejecución sobre el hueco. Las pérdidas de eventos o
+tramas marcan la traza incompleta; no se inventa el trabajo que falta. Tras una
+pérdida se espera un SWITCH para volver a inferir ejecución. Sin STOP confirmado,
+el último tramo puede quedar abierto: solo se dibujan límites observados.
 
-Tick es uint32 desde START: esta versión no extiende rollover. Mantener las
-sesiones por debajo de 2^32 ticks (≈497 días con tick de 10 ms); el firmware debe
-usar aritmética adecuada para plazos y notificar cualquier reinicio inesperado.
+## Reportes de tick
 
-## Recuperación y transacciones
+```text
+[tick:u32]
+[misses:u16][sporadic_ignored:u16][ticks_lost:u16]
+[events_dropped:u16][bad_frames:u16]
+[max_busy_us:u32][max_wake_latency_us:u32]
+```
 
-El host procesa bytes parciales, varias tramas juntas y ruido previo a la marca.
-Ante CRC/longitud inválida descarta bytes y busca nueva marca; tras 200 ms sin
-completar una trama descarta el fragmento. Cuenta/informa errores. Los huecos
-perdidos quedan como telemetría incompleta. Una trama con CRC correcto y contenido
-no previsto se registra como inesperada y no confirma despliegues.
+Los cinco contadores saturan en 65535. tick k indica que ya se procesó el tramo
+[k,k+1). Los reportes comienzan en N y siguen sus múltiplos. Tras perder ticks
+se envía un solo reporte y se avanza al siguiente múltiplo, sin ráfaga.
 
-Un solo intercambio pendiente por controlador. Poll bloqueante espera puerto y
-eventfd; write maneja parcialidad y tiene un plazo total. La respuesta tiene
-`timeout_ms` adicional desde que finalizó el envío. No se retransmite ninguna
-orden en esta versión: **cero reintentos automáticos**, un límite deliberado.
-El ACK actual solo identifica tipo y no permite distinguir un ACK tardío de uno
-de una repetición. Tras timeout se declara resultado incierto, se conserva la
-reserva hasta procesar caída y se excluye ese nodo de nuevas admisiones. No se
-reutiliza su canal para otro despliegue. Se puede solicitar STOP al cerrar.
-Para habilitar reintentos de efectos se necesitarían IDs de transacción y caché
-de respuestas en ambos firmwares, o consulta fiable del estado instalado.
+El ESP32 puede intercalar reportes entre lotes de eventos más antiguos. El host
+actualiza el watchdog inmediatamente con CLOCK_MONOTONIC, sin exigir que el tick
+del reporte sea posterior al último evento. No usa el reporte para adelantar el
+cursor del Gantt mientras pueden faltar eventos anteriores. Los contadores y
+los tiempos se conservan en events.csv y los contadores se muestran en HTML.
 
-Rechazo explícito libera la reserva de ADD_TASK; comunicación perdida no se
-registra como rechazo definitivo ni como confirmación. La reubicación posterior
-es una decisión por caída y se distingue en eventos; no resuelve la posibilidad
-de que el nodo aislado siga ejecutando (ver README, particiones y fencing).
+## Transporte, tiempos y errores
 
-## Lista concreta para cada compañero
+Un intercambio pendiente por driver. Sin retransmisión automática de comandos.
+Tramas con CRC/longitud inválidos se descartan. El receptor local recupera la
+marca de inicio y cuenta errores; el host vence tramas parciales después de 200 ms.
+Los lotes EVENT se validan completos antes de publicar registros en la cola IPC.
 
-ESP32: conservar UART/pines/ESP-IDF, codecs, UT y calibración; conectar la tabla
-validada al calendarizador local; implementar CONFIGURE, START, ADD_TASK, TICK,
-STOP y SPORADIC según arriba; instrumentar ocho eventos con transmisión de fondo,
-contador de pérdidas, botón/debounce/intervalo mínimo y LEDs. No reemplazar DEPLOY
-por append: el host distingue ambos tipos. Actualizar criticidad a int32.
+El host espera 1 s tras abrir el puerto para permitir el arranque de placas que
+se reinician con USB/DTR. El tiempo de espera de CAL_REQ es como mínimo
+50*tick_us + 1 s. STOP y ADD_TASK tienen como mínimo tick_us + 1 s, para terminar
+un tramo y, en STOP, vaciar la cola UART. timeout_ms puede aumentar esos límites.
+No se fijan velocidades sintéticas en producción.
 
-Pico: conservar PlatformIO/board/pines escogidos; conectar codecs y parser USB al
-main; incorporar calibración por tick solicitado con margen, parser CSV y tabla
-de al menos ocho tareas; implementar el mismo contrato, scheduler RMS/EDF local,
-eventos, heartbeat, botón y LEDs. La cola existente necesita sincronización
-correcta entre ISR/productor y consumidor según su uso; no asumir que su clase
-actual es segura para acceso concurrente. No se modificó esa implementación.
+En Pico, las respuestas de control tienen una cola acotada y prioridad frente
+a telemetría. Cada vuelta atiende un comando y un lote de eventos para dejar
+progresar el timer. TICK_REPORT puede salir entre lotes para evitar que una cola
+saturada impida al host recibir heartbeat. En ESP32, ejecución, recepción UART
+y transmisión de eventos usan contextos separados.
 
-UT se mantuvo en sus ubicaciones actuales para no romper compilaciones que no
-pueden verificarse aquí. `host/ut.c` y ESP32 son idénticos; la copia Pico ya tenía
-un `#include "ut.h"` adicional. No se borró ni normalizó ninguna copia.
-`UT_SHA256SUMS` conserva los hashes iniciales y verifica que no cambiaron.
+Los drivers publican eventos por memoria compartida; reporte nunca lee serial.
+El reporte genera events.csv, gantt.csv, tasks.csv y report.html. START se encola
+para ambos nodos antes de esperar ACK: sus intervalos envío/ACK dan una cota de
+desfase inicial, no una medición exacta del instante físico.
+
+Las pruebas locales están en [TESTING.md](TESTING.md). La carga y verificación
+con placas reales se describen en [HARDWARE_TEST.md](HARDWARE_TEST.md).

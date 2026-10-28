@@ -1,9 +1,11 @@
+// CRC-16
 #include "crc16.h"
 
 // Procesa un byte: entra por la parte alta del registro (MSB primero)
 uint16_t crc16_update(uint16_t crc, uint8_t byte){
     crc ^= static_cast<uint16_t>(byte) << 8;
 
+    // si el bit que sale es 1 se aplica el polinomio
     for (int bit = 0; bit < 8; ++bit) {
         if ((crc & 0x8000U) != 0) {
             crc = static_cast<uint16_t>((crc << 1) ^ CRC16_POLY);

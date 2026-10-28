@@ -38,18 +38,37 @@ static bool report_pending = false;
 static Frame pending_last;
 static bool last_pending = false;
 
-void usb_send(const Frame *frame){
+// Respuestas de control: una UART/USB llena no debe perder un ACK ya aplicado.
+// El host mantiene una sola orden pendiente; el límite también acota entradas
+// ajenas al host. Se atienden antes de la telemetría.
+static Frame replies[8];
+static size_t reply_head = 0, reply_count = 0;
+
+// Codifica y escribe la trama solo si cabe entera en el búfer de TinyUSB,
+// así Serial.write nunca se queda esperando. Devuelve false si no se envió.
+static bool write_now(const Frame *frame){
     static uint8_t out[FRAME_MAX_SIZE];
 
     const size_t size = encode_frame(frame, out, sizeof(out));
 
-    // si el USB no tiene espacio (host no lee) se descarta en vez de esperar
+    // Si el USB no tiene espacio, el llamador conserva o cuenta la trama.
     if (Serial.availableForWrite() < (int)size) {
-        return;
+        return false;
     }
 
     // write envía los bytes
-    Serial.write(out, size);
+    return Serial.write(out, size) == size;
+}
+
+// Envía una respuesta de control ya, o la deja en cola si no cabe
+void usb_send(const Frame *frame){
+    // si ya hay respuestas en cola, esta va detrás para no cambiar el orden
+    if (reply_count == 0 && write_now(frame)) return;
+    // con la cola llena la respuesta se descarta
+    if (reply_count < 8) {
+        replies[(reply_head + reply_count) % 8] = *frame;
+        ++reply_count;
+    }
 }
 
 // Si el receptor descartó tramas (CRC malo o largo mayor a 512), se cuentan
@@ -61,9 +80,11 @@ static void count_receiver_errors(){
     counted_length_errors = receiver.length_errors();
 }
 
+// Lee los bytes disponibles hasta completar una trama, sin esperar
 bool usb_receive(Frame *frame){
     // Procesar solo los bytes que ya llegaron (no se queda esperando)
-    while (Serial.available() > 0) {
+    size_t budget = FRAME_MAX_SIZE;
+    while (budget-- > 0 && Serial.available() > 0) {
         const uint8_t byte = Serial.read();
         last_byte_ms = millis();
 
@@ -86,6 +107,7 @@ bool usb_receive(Frame *frame){
     return false;
 }
 
+// Pone un evento en la cola de envío
 void usb_add_event(EventType type, uint32_t tick, uint16_t task_id, uint16_t value){
     NodeEvent event;
 
@@ -100,20 +122,40 @@ void usb_add_event(EventType type, uint32_t tick, uint16_t task_id, uint16_t val
     }
 }
 
+// Deja un TICK_REPORT pendiente (reemplaza al anterior si no salió)
 void usb_post_report(const Frame *report){
     pending_report = *report;
     report_pending = true;
 }
 
+// Deja una trama para el final, después de eventos y reporte
 void usb_post_last(const Frame *frame){
     pending_last = *frame;
     last_pending = true;
 }
 
+// Envía lo pendiente en orden: respuestas, reporte, eventos y la última trama
 void usb_send_events(){
     static Frame message;
 
-    while (!events.empty()) {
+    // Primero las respuestas de control que quedaron sin enviar, en orden
+    while (reply_count > 0) {
+        if (!write_now(&replies[reply_head])) return;
+        reply_head = (reply_head + 1) % 8;
+        --reply_count;
+    }
+
+    // Reservar primero el heartbeat mientras hay ejecución: un lote de eventos
+    // podría ocupar todo el espacio USB en cada vuelta indefinidamente.
+    // Durante STOP ya no entran eventos; el reporte final espera al vaciado.
+    if (report_pending && !last_pending) {
+        if (!write_now(&pending_report)) return;
+        report_pending = false;
+    }
+
+    // Un lote por vuelta deja atender el timer y evita que una cola de
+    // eventos saturada prive al watchdog de sus reportes.
+    if (!events.empty()) {
         // se arma el lote con los eventos que caben en el espacio libre del USB
         const int space = Serial.availableForWrite() - (int)FRAME_MIN_SIZE - 1;
         if (space < (int)EVENT_RECORD_SIZE) {
@@ -122,41 +164,46 @@ void usb_send_events(){
         }
 
         build_event_batch(&message, &events, (size_t)space / EVENT_RECORD_SIZE);
-        usb_send(&message);
+        // si al final no cupo, esos eventos ya salieron de la cola: se cuentan
+        if (!write_now(&message)) dropped_events += message.payload[0];
     }
 
-    // el reporte sale después de los eventos 
-    if (report_pending) {
+    // En STOP, el último reporte sale después de todos los eventos.
+    if (report_pending && events.empty()) {
         if (Serial.availableForWrite() < (int)(FRAME_MIN_SIZE + pending_report.length)) {
             return;
         }
-        usb_send(&pending_report);
+        if (!write_now(&pending_report)) return;
         report_pending = false;
     }
 
     // y al final la trama que tenía que esperar a todo lo anterior
-    if (last_pending) {
+    if (last_pending && events.empty() && !report_pending) {
         if (Serial.availableForWrite() < (int)(FRAME_MIN_SIZE + pending_last.length)) {
             return;
         }
-        usb_send(&pending_last);
+        if (!write_now(&pending_last)) return;
         last_pending = false;
     }
 }
 
+// Tramas descartadas desde START
 uint32_t usb_bad_frames(){
     return bad_frames;
 }
 
+// Eventos descartados desde START
 uint32_t usb_events_dropped(){
     return dropped_events;
 }
 
+// Contadores de tramas malas y eventos descartados en 0
 void usb_reset_counters(){
     bad_frames = 0;
     dropped_events = 0;
 }
 
+// Vacía la cola de eventos y descarta el reporte pendiente
 void usb_clear_events(){
     NodeEvent event;
 

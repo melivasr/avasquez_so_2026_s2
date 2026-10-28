@@ -1,0 +1,10 @@
+id,tipo,W,T,D,criticidad
+# Worst-Fit: Pico 1,3,4,5(S) y ESP32 2,6.
+# fail pico: 2 y 6 se quedan, 1 se reubica, se rechazan 4 y luego 3
+# (menor criticidad primero) y 5 por esporadica. fail esp: caben todas.
+1,P,6000,15,15,9
+2,P,3800,10,10,2
+3,P,3800,12,12,6
+4,P,1800,8,8,1
+5,S,1800,20,20,7
+6,P,1800,10,10,4

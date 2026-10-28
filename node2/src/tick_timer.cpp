@@ -22,6 +22,7 @@ static bool on_tick(repeating_timer_t *t){
     return true;
 }
 
+// Reinicia el conteo en 0 y arranca la alarma cada tick_us
 bool tick_timer_start(uint32_t tick_us){
     // un periodo de 0 no tiene sentido
     if (tick_us == 0) {
@@ -46,6 +47,7 @@ bool tick_timer_start(uint32_t tick_us){
     return true;
 }
 
+// Cancela la alarma; el conteo queda como estaba
 void tick_timer_stop(){
     // solo se cancela si había un timer activo
     if (running) {
@@ -54,10 +56,12 @@ void tick_timer_stop(){
     }
 }
 
+// Ticks marcados desde tick_timer_start
 uint32_t tick_timer_count(){
     return ticks_elapsed;
 }
 
+// Hora (us) del último tick marcado
 uint32_t tick_timer_last_us(){
     return last_tick_us;
 }

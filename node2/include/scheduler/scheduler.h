@@ -1,3 +1,5 @@
+// Calendarizador base: lo común a RMS y EDF. Cada uno solo define
+// has_priority, es decir, cuál de dos tareas pendientes corre primero.
 #pragma once
 
 #include <stddef.h>
@@ -5,6 +7,7 @@
 
 #include "event_queue.h"
 #include "task.h"
+#include "../../../common/rt_jobs.h"
 
 // Pulsaciones de la esporádica que generan un evento cada una en un tick;
 // las demás solo se cuentan
@@ -14,10 +17,10 @@
 #define SCHED_IGNORED_MIN_INTERVAL 0U // no pasó el intervalo mínimo T
 #define SCHED_IGNORED_NO_TASK 1U      // el nodo no tiene tarea esporádica
 
-// Eventos que puede generar un tick: hasta MAX_TASKS plazos perdidos,
+// Eventos que puede generar un tick: hasta RT_MAX_JOBS plazos perdidos,
 // MAX_TASKS liberaciones, las pulsaciones ignoradas, un cambio de tarea
 // y una finalización
-#define SCHED_MAX_EVENTS_PER_TICK (2U * MAX_TASKS + SCHED_MAX_PRESS_EVENTS_PER_TICK + 2U)
+#define SCHED_MAX_EVENTS_PER_TICK (RT_MAX_JOBS + MAX_TASKS + SCHED_MAX_PRESS_EVENTS_PER_TICK + 2U)
 
 // Lo que pasó y lo que hay que hacer en un tick
 struct TickDecision {
@@ -26,7 +29,7 @@ struct TickDecision {
     bool completed; // el trabajo terminó en este tick
 
     // tareas cuyo trabajo se abortó 
-    uint32_t missed[MAX_TASKS];
+    uint32_t missed[RT_MAX_JOBS];
     size_t missed_count;
 
     // tareas que liberaron un trabajo nuevo en este tick
@@ -43,9 +46,9 @@ struct TaskState {
     Task task;
     bool pending; // hay un trabajo liberado sin terminar
     uint32_t remaining; // UT que le faltan al trabajo actual
-    uint32_t next_release; // tick de la próxima liberación (periódicas)
-    uint32_t release_tick; // tick en que se liberó el último trabajo
-    uint32_t deadline; // plazo absoluto: debe terminar antes de este tick
+    uint64_t next_release; // tick de la próxima liberación (periódicas)
+    uint64_t release_tick; // tick en que se liberó el último trabajo
+    uint64_t deadline; // plazo absoluto del trabajo pendiente más antiguo
     uint32_t job_seq; // número del último trabajo liberado (el primero es 1)
 };
 
@@ -54,9 +57,12 @@ public:
     Scheduler();
     virtual ~Scheduler() {}
 
-    // Carga las tareas. Devuelve false si count es mayor a MAX_TASKS,
-    // si ut_per_tick es 0 o si alguna tarea tiene T en 0.
+    // Carga una tabla válida, incluyendo la reserva de trabajos pendientes.
+    // Un rechazo conserva la configuración anterior.
     bool configure(const Task *tasks, size_t count, uint32_t ut_per_tick);
+
+    // Agrega sin reiniciar el reloj ni los trabajos existentes.
+    bool add_task(const Task &task, uint32_t first_tick);
 
     // Procesa el tick now (ticks desde START): aborta las tareas que
     // llegaron a su plazo, libera las periódicas que tocan, atiende las
@@ -68,6 +74,7 @@ public:
     // se atienden en el próximo tick
     void sporadic_press(uint32_t presses);
 
+    // Tareas cargadas
     size_t count() const;
 
     // true si hay una tarea esporádica cargada
@@ -81,16 +88,17 @@ protected:
     virtual bool has_priority(const TaskState &a, const TaskState &b) const = 0;
 
 private:
-    // Libera un trabajo nuevo de state en el tick now (si el anterior seguía
-    // sin terminar, se aborta como plazo perdido)
-    void release_job(TaskState &state, uint32_t now, TickDecision &decision);
+    // Encola un trabajo independiente, conservando los anteriores.
+    void release_job(TaskState &state, uint64_t now, TickDecision &decision);
 
     // Atiende las pulsaciones pendientes de la esporádica
-    void handle_presses(uint32_t now, TickDecision &decision);
+    void handle_presses(uint64_t now, TickDecision &decision);
 
     TaskState states_[MAX_TASKS];
-    size_t count_;
-    uint32_t ut_per_tick_;
+    RtJobs jobs_; // trabajos activos de todas las tareas (tabla fija de RT_MAX_JOBS)
+    RtClock clock_; // extiende el tick de 32 bits a 64 bits
+    size_t count_; // tareas cargadas en states_
+    uint32_t ut_per_tick_; // UT que se ejecutan en un tick (s_n)
     uint32_t running_id_; // tarea que corrió en el tick anterior (NO_TASK = ocioso)
     uint32_t pending_presses_; // pulsaciones sin atender
     uint32_t sporadic_ignored_; // pulsaciones ignoradas desde configure

@@ -1,4 +1,22 @@
 id,tipo,W,T,D,criticidad
-1,P,40,20,20,2
-2,P,10,10,8,1
-3,S,6,15,10,3
+# Carga de HW para Gantt, estadisticas, plazos, esporadicas y rechazos.
+# Con tick_us=10000, los periodos estan entre 150 ms y 1 s (salvo la sobrecarga 12).
+# 1..7: periodicas con distintos periodos, trabajos y criticidades; D=T.
+1,P,140,20,20,5
+2,P,210,35,35,4
+3,P,350,50,50,2
+4,P,490,80,80,1
+5,P,70,15,15,6
+6,P,280,45,45,3
+7,P,700,100,100,1
+# 8: plazo corto; si s_n<140, C>1 y se esperan MISS y LED de plazo perdido.
+8,P,140,60,1,2
+# 9 y 10: botones/trigger; la segunda requiere otro nodo por el limite de una S.
+9,S,70,40,10,9
+10,S,70,50,12,8
+# 11: comprobar rechazo de una tercera esporadica si 9 y 10 fueron admitidas.
+11,S,70,60,12,7
+# 12: sobrecarga deliberada para comprobar rechazo por utilizacion.
+12,P,4294967295,1,1,0
+# Ejecutar 30 s o mas, pulsar ambos botones y finalizar con q para generar HTML.
+# La asignacion, admision y cantidad de MISS dependen de la calibracion real.

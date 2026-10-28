@@ -7,21 +7,22 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../../../common/rt_protocol.h"
 
-constexpr size_t EVENT_RECORD_SIZE = 9;       // [tipo 1B][tick 4B LE][id 2B LE][arg 2B LE]
+constexpr size_t EVENT_RECORD_SIZE = RT_EVENT_RECORD_SIZE;       // [tipo 1B][tick 4B LE][id 2B LE][arg 2B LE]
 constexpr size_t EVENT_QUEUE_CAPACITY = 256;  // registros
-constexpr size_t EVENT_MAX_PER_FRAME = 56;    // 1 + 56 * 9 = 505 <= 512
+constexpr size_t EVENT_MAX_PER_FRAME = RT_EVENT_MAX_BATCH;    // 1 + 56 * 9 = 505 <= 512
 
 // Valores de la tabla de eventos de README_NODO.md (9.5).
 enum class NodeEventType : uint8_t {
-    Release = 0x01,
-    Switch = 0x02,
-    Complete = 0x03,
-    Miss = 0x04,
-    SporadicIgnored = 0x05,
-    TaskAdded = 0x06,
-    TickLost = 0x07,
-    BadFrame = 0x08
+    Release = RT_RELEASE,
+    Switch = RT_SWITCH,
+    Complete = RT_COMPLETE,
+    Miss = RT_MISS,
+    SporadicIgnored = RT_SPORADIC_IGNORED,
+    TaskAdded = RT_TASK_ADDED,
+    TickLost = RT_TICK_LOST,
+    BadFrame = RT_BAD_FRAME
 };
 
 struct EventRecord {

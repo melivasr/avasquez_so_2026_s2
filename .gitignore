@@ -1,0 +1,31 @@
+# host: compilación, reportes y caché de Python
+/host/**/build/
+/host/**/__pycache__/
+/host/**/*.pyc
+
+# node2: PlatformIO y configuración local de VS Code
+/node2/**/.pio
+/node2/.vscode/c_cpp_properties.json
+/node2/.vscode/launch.json
+
+# nodo1ESP: PlatformIO y configuración local de VS Code
+/nodo1ESP/ESP_RT_Timer/**/.pio/
+/nodo1ESP/ESP_RT_Timer/.vscode/.browse.c_cpp.db*
+/nodo1ESP/ESP_RT_Timer/.vscode/ipch/
+/nodo1ESP/ESP_RT_Timer/.vscode/c_cpp_properties.json
+/nodo1ESP/ESP_RT_Timer/.vscode/launch.json
+
+# nodo1ESP: archivos del sistema operativo
+/nodo1ESP/ESP_RT_Timer/**/.DS_Store
+/nodo1ESP/ESP_RT_Timer/**/.AppleDouble
+/nodo1ESP/ESP_RT_Timer/**/.LSOverride
+/nodo1ESP/ESP_RT_Timer/**/Thumbs.db
+/nodo1ESP/ESP_RT_Timer/**/Desktop.ini
+
+# nodo1ESP: archivos temporales, respaldos y logs
+/nodo1ESP/ESP_RT_Timer/**/*.tmp
+/nodo1ESP/ESP_RT_Timer/**/*.bak
+/nodo1ESP/ESP_RT_Timer/**/*~
+/nodo1ESP/ESP_RT_Timer/**/*.log
+
+.codex/

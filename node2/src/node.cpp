@@ -1,3 +1,8 @@
+// ESTADO DEL NODO
+// Atiende los mensajes del host según el estado (sin calibrar, calibrado,
+// configurado, corriendo, detenido) y procesa cada tick: calendarizador,
+// unidades de trabajo, eventos, LEDs y TICK_REPORT.
+
 #include <Arduino.h>
 
 #include "node.h"
@@ -14,6 +19,7 @@ extern "C" {
 }
 
 // Cada cuántos ticks cambia el LED (50 x 10 ms = medio segundo)
+// (LED integrado de la placa, solo para ver que los ticks avanzan)
 #define LED_EVERY_TICKS 50U
 
 // Rango aceptado para el tick: 1 ms a 1 s
@@ -52,6 +58,7 @@ static SchedulerRms scheduler_rms;
 static SchedulerEdf scheduler_edf;
 static Scheduler *scheduler = nullptr;
 
+// Estado del LED integrado (parpadeo de vida)
 static bool led = false;
 
 // El LED de plazo perdido se enciende con cada MISS y se apaga solo
@@ -118,7 +125,14 @@ static void handle_deploy_tasks(const Frame *frame){
     }
 
     // alguna tarea mal escrita (se puede desplegar antes de calibrar)
-    if (!parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+    if (frame->length != 0 &&
+        !parse_task_list((const char *)frame->payload, frame->length, pending, MAX_TASKS, &count)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // las tareas no caben en la tabla de 64 trabajos activos
+    if (!rt_jobs_fit(pending, count)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
@@ -135,17 +149,6 @@ static void handle_deploy_tasks(const Frame *frame){
     }
 
     send_ack(frame, StatusCode::Ok);
-}
-
-// La tarea según su posición;
-// 0 si no hay tarea. Es lo que muestran los LEDs.
-static uint32_t slot_for_id(uint32_t task_id){
-    for (size_t i = 0; i < task_count; i++) {
-        if (tasks[i].id == task_id) {
-            return (uint32_t)(i + 1);
-        }
-    }
-    return 0;
 }
 
 // Procesa el tick indicado: calendarizador, trabajo y eventos
@@ -172,7 +175,7 @@ static void process_tick(uint32_t now){
         usb_add_event(event.type, event.tick, event.task_id, event.value);
 
         if (event.type == EventType::Switch) {
-            hardware_show_slot(slot_for_id(event.task_id));
+            hardware_show_slot(event.task_id); // ID de la tarea en ejecución; 0 = ocioso
         } else if (event.type == EventType::Miss) {
             hardware_set_miss(true);
             miss_lit = true;
@@ -215,6 +218,49 @@ static void report_if_due(uint32_t now){
     }
 }
 
+// ADD_TASK: agrega entre ticks sin reemplazar las tareas anteriores.
+// Se puede usar detenido (queda para el próximo START) o corriendo.
+static void handle_add_task(const Frame *frame){
+    // la línea puede venir con '\n' al final
+    size_t length = frame->length;
+    if (length > 0 && frame->payload[length - 1] == '\n') --length;
+
+    // tabla llena o línea mal escrita
+    Task task = {};
+    if (task_count >= MAX_TASKS ||
+        !parse_task_line((const char *)frame->payload, length, &task)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+    // id repetido o una segunda esporádica
+    for (size_t i = 0; i < task_count; ++i) {
+        if (tasks[i].id == task.id ||
+            (task.type == TaskType::Sporadic && tasks[i].type == TaskType::Sporadic)) {
+            send_ack(frame, StatusCode::Error);
+            return;
+        }
+    }
+    // con la nueva no alcanzarían los 64 trabajos reservados
+    if (!rt_jobs_fit(tasks, task_count, &task)) {
+        send_ack(frame, StatusCode::Error);
+        return;
+    }
+
+    // corriendo: entra al calendarizador desde el tick actual y se avisa
+    // al host con TASK_ADDED (arg = ranura que ocupa, 1..8)
+    if (state == NodeState::Running) {
+        if (!scheduler->add_task(task, tick_count)) {
+            send_ack(frame, StatusCode::Error);
+            return;
+        }
+        usb_add_event(EventType::TaskAdded, tick_count, (uint16_t)task.id,
+                      (uint16_t)(task_count + 1));
+    }
+    // también queda en la tabla para los próximos START
+    tasks[task_count++] = task;
+    send_ack(frame, StatusCode::Ok);
+}
+
 // START: tick 0 y arranca el timer
 static void handle_start(const Frame *frame){
     Algorithm algorithm;
@@ -250,6 +296,7 @@ static void handle_start(const Frame *frame){
         return;
     }
 
+    // contadores y colas desde cero para esta ejecución
     scheduler = chosen;
     report_ticks = requested_report_ticks;
     next_report = requested_report_ticks;
@@ -260,6 +307,7 @@ static void handle_start(const Frame *frame){
     usb_reset_counters();
     usb_clear_events();
 
+    // LEDs apagados; las pulsaciones previas a START se descartan
     hardware_show_slot(0);
     hardware_set_miss(false);
     miss_lit = false;
@@ -333,6 +381,7 @@ static void handle_sporadic_release(const Frame *frame){
     send_ack(frame, StatusCode::Ok);
 }
 
+// Se llama una vez desde setup()
 void node_setup(){
     pinMode(LED_BUILTIN, OUTPUT);
 
@@ -340,6 +389,7 @@ void node_setup(){
     hardware_setup();
 }
 
+// Envía cada trama a su manejador según el tipo
 void node_handle_frame(const Frame *frame){
     if (frame->type == (uint8_t)MessageType::CalibrateReq) {
         handle_calibrate_req(frame);
@@ -351,6 +401,10 @@ void node_handle_frame(const Frame *frame){
     }
     if (frame->type == (uint8_t)MessageType::Start) {
         handle_start(frame);
+        return;
+    }
+    if (frame->type == (uint8_t)MessageType::AddTask) {
+        handle_add_task(frame);
         return;
     }
     if (frame->type == (uint8_t)MessageType::Stop) {
@@ -371,7 +425,7 @@ void node_handle_frame(const Frame *frame){
     send_ack(frame, StatusCode::NotImplemented);
 }
 
-
+// Se llama en cada vuelta de loop(); procesa a lo sumo un tick
 void node_tick(){
     // solo con el calendarizador corriendo
     if (state != NodeState::Running) {
@@ -385,7 +439,7 @@ void node_tick(){
     const uint32_t start_us = micros();
 
     // el timer todavía no marcó el tick que sigue
-    if (reached < tick_count) {
+    if ((int32_t)(reached - tick_count) < 0) {
         return;
     }
 
@@ -396,8 +450,7 @@ void node_tick(){
     }
 
     // se atrasó: los ticks que faltaron se cuentan y se salta al actual
-    // 
-    if (reached > tick_count) {
+    if (reached != tick_count) {
         const uint32_t lost = reached - tick_count;
         ticks_lost += lost;
         usb_add_event(EventType::TickLost, reached, NO_TASK,
@@ -418,6 +471,7 @@ void node_tick(){
     report_if_due(now);
 }
 
+// Próximo tick a procesar
 uint32_t node_tick_count(){
     return tick_count;
 }

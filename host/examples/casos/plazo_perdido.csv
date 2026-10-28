@@ -1,0 +1,7 @@
+id,tipo,W,T,D,criticidad
+# EDF en Pico. La 1 necesita C=3 pero D=2: corre 0-1 y MISS en tick 2
+# (liberacion + D, no + T); luego 3 en tick 2 y 2 en ticks 3-4.
+# MISS en 2, 12, 22...; la 2 y la 3 completan siempre.
+1,P,6000,10,2,1
+2,P,3800,15,15,1
+3,P,1800,10,10,1

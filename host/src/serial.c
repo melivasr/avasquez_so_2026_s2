@@ -1,3 +1,4 @@
+// Abre el puerto serial y envía bytes con tiempos de espera acotados.
 #include "host.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -5,6 +6,8 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+
+// Configura modo raw a 115200 y solicita acceso exclusivo al puerto.
 int serial_open(const char *path) {
     int fd=open(path,O_RDWR|O_NOCTTY|O_NONBLOCK|O_CLOEXEC);
     if(fd<0)return -1;
@@ -18,7 +21,8 @@ int serial_open(const char *path) {
     t.c_cc[VMIN]=1;
     t.c_cc[VTIME]=0;
     if(tcsetattr(fd,TCSANOW,&t)<0)goto bad;
-    /* Evita bajar DTR deliberadamente al cerrar; la placa puede tener auto-reset propio. */
+
+    // Evita bajar DTR deliberadamente al cerrar; algunas placas tienen auto-reset propio.
     t.c_cflag&=~(tcflag_t)HUPCL;
     if(tcsetattr(fd,TCSANOW,&t)<0)goto bad;
     return fd;
@@ -30,6 +34,7 @@ int serial_open(const char *path) {
     }
 }
 
+// Repite escrituras parciales hasta completar el envío o vencer el límite total.
 int serial_write(int fd,const uint8_t *p,size_t n,uint32_t ms) {
     uint64_t end=monotonic_ns()+(uint64_t)ms*1000000;
     while(n) {
@@ -42,12 +47,15 @@ int serial_write(int fd,const uint8_t *p,size_t n,uint32_t ms) {
         struct pollfd f= {
             .fd=fd,.events=POLLOUT
         };
+        // Espera capacidad de escritura sin ocupar la CPU en un sondeo continuo.
         int r=poll(&f,1,wait);
         if(r<0 && errno==EINTR)continue;
         if(r<=0 || (f.revents&(POLLERR|POLLHUP|POLLNVAL)))return -1;
         ssize_t k=write(fd,p,n);
+        // Una señal o falta temporal de espacio permite reintentar, conservando el límite total de tiempo.
         if(k<0 && (errno==EINTR || errno==EAGAIN))continue;
         if(k<=0)return -1;
+        // Avanza solo lo realmente escrito para no repetir bytes cuando write acepta una parte.
         p+=(size_t)k;
         n-=(size_t)k;
     }

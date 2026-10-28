@@ -1,120 +1,67 @@
-# Verificación del host
+# Verificación de comunicación
 
-Pruebas ejecutadas en Linux sin hardware. El emulador Python usa PTY y velocidades
-sintéticas; transmite trabajos de muestra para probar recepción y reporte.
-**No ejecuta UT ni implementa/valida un calendarizador local RMS/EDF.**
-
-## Ejecución
+Desde `host/`, en Linux con GCC, G++, Make y Python 3:
 
 ```sh
-cd host
 make test
 ASAN_OPTIONS=detect_leaks=0 make sanitize
 make clean
 make
-sha256sum -c docs/UT_SHA256SUMS
 ```
 
-Compilación C11 con Wall, Wextra, Wpedantic, Wshadow, Wconversion y
-Wstrict-prototypes, sin advertencias del código nuevo. Las pruebas de
-interoperabilidad compilan los codecs originales con G++, sin SDK.
+La suite no requiere pyserial, PlatformIO ni dispositivos seriales. Usa carpetas
+temporales para sus reportes y PTY para conectar el host con dos instancias de
+las fuentes reales de Pico compiladas en Linux. `tests/native/` sustituye solo
+las interfaces de Arduino/USB, GPIO y alarma por implementaciones de prueba.
+La calibración y las UT del firmware se ejecutan realmente sobre la CPU Linux;
+sus velocidades no representan las placas. Las dos ranuras del host usan Pico
+en esta prueba; el runtime ESP-IDF se comprueba por separado en sus módulos puros.
 
-El primer intento con LeakSanitizer habilitado falló: su runtime no funciona
-bajo ptrace en este entorno. Desactivando únicamente `detect_leaks`, la suite
-pasó con AddressSanitizer y UndefinedBehaviorSanitizer. No se afirma haber
-verificado fugas con LeakSanitizer. Repetir ese análisis en otra máquina.
+## Cobertura
 
-## Cobertura automatizada
+- `test_core.c`: límites de ID y criticidad, admisión EDF/RMS, Worst-Fit,
+  migración, CRC, START, tiempos de espera y decodificación atómica de lotes.
+- `test_interop.cpp`: 60 tramas con cada codec original ESP32/Pico, tamaños
+  hasta 512 bytes, CRC corrupto y TICK_REPORT/EVENT producidos por sus módulos
+  originales y consumidos por el host. También valida START con el parser Pico.
+- `test_report.c`: Gantt con SWITCH, trabajos consecutivos sin cambio de ID,
+  heartbeat intercalado con eventos viejos, TICK_LOST y motivos de esporádicas.
+- `test_pico.cpp`: criticidad int32, NUL/overflow, inserción local conservando
+  progreso, primera liberación y rechazo de segunda esporádica/ID duplicado.
+- `test_jobs.cpp`, compilado contra cada núcleo: trabajos periódicos y
+  esporádicos solapados, FIFO en RMS/EDF, plazo grande agregado después del
+  tick cero, vuelta del contador de 32 bits, capacidad y vencimientos en lote.
+- El reporte comprueba latencias y Gantt de dos trabajos solapados del mismo
+  ID. La integración verifica que un intento duplicado se registra aparte y
+  la tarea original continúa ejecutándose con sus parámetros.
+- Cuatro suites originales `ESP_RT_Timer/host_tests/*_test.cpp`: núcleo RMS/EDF,
+  parser, cola y reporte de tick. Se incluye la criticidad negativa en el parser.
+- `integration.py`: comandos del firmware nativo, tabla vacía, heartbeat sin
+  tareas, ID 65535, ADD_TASK, disparo/intervalo mínimo, CRC malo, STOP con vaciado,
+  arranque del host en RMS/EDF, inserción y migración sin otro START, rechazo de
+  esporádica del caído, reportes CSV/Gantt, calibración que supera timeout_ms,
+  continuidad de nodos tras SIGTERM, heartbeat con la cola de eventos saturada,
+  cierre automático tras el arranque con STOP y reporte, terminación manual
+  antes del límite, fail con STOP previo a migrar, ambos comandos fail,
+  ausencia de telemetría posterior, fail seguido de q en el mismo bloque,
+  reubicación aunque falte el ACK de STOP y entradas inválidas antes de abrir puertos.
 
-`tests/test_core.c` verifica:
+`make sanitize` compila con AddressSanitizer y UndefinedBehaviorSanitizer. La
+opción mostrada desactiva únicamente LeakSanitizer; no constituye prueba de fugas.
+El adaptador nativo no prueba el SDK, ISR reales, USB físico, LEDs ni botones.
 
-- Redondeo C con divisiones exactas y UINT32_MAX, sin sumar W+s-1.
-- EDF en uno y encima de uno, incluido exceso diminuto 1/(T1*T2); límite RMS
-  y carga EDF admitida/RMS rechazada.
-- Selección FF/WF distinta, velocidades invertidas y desempate por ID.
-- Capacidad, esporádica existente y nodo no operativo.
-- Criticidad negativa y límites int32, D<T/D>T, campos vacíos/extras, ceros,
-  caracteres residuales, overflow y duplicados en archivo.
-- CRC vector 0x29B1, tramas consecutivas/byte a byte, ruido pseudoaleatorio,
-  corrupción, longitud excesiva, recuperación y fragmentos expirados.
-- Dos procesos productores y consumidor, unicidad de registros, cola llena,
-  timeout, contador de descartes y centinela que despierta consumidor bloqueado.
-- Migración con carga previa fija: se conserva una tarea más crítica aunque
-  una menos crítica tenga mayor utilización; no migran esporádicas.
+## Comparaciones
 
-`tests/test_interop.cpp` comprueba ida/vuelta byte por byte del codec C con
-cada codec original ESP32/Pico, sin modificar sus fuentes.
+`examples/edf_vs_rms.csv` y `examples/ff_vs_wf.csv`, junto con las cuatro
+configuraciones `examples/experiment_*.ini`, preparan las comparaciones físicas.
+[EXPERIMENTS.md](EXPERIMENTS.md) detalla los comandos y resultados esperados
+usando como referencia ESP32=70 y Pico=105 UT/tick. Los resultados dependen de
+s_n medido en cada corrida. No se fija la velocidad de ninguna placa ni se
+presentan las pruebas nativas como experimentos físicos RMS/EDF o FF/WF.
 
-`tests/integration.py` ejecuta el binario completo con nodos emulados:
+## Validación con placas
 
-1. Configuraciones desconocidas/repetidas y rangos inválidos; CSV duplicado,
-   NUL y línea excesiva: salida 2 antes de abrir puertos o crear hijos.
-2. Tres hijos del coordinador en `/proc`: dos drivers y reporte.
-3. Inserción: un DEPLOY, un START y un ADD_TASK; sin STOP/START adicional.
-4. Solicitud esporádica confirmada, CRC roto y lecturas fragmentadas.
-5. CSV/HTML/Gantt desde RUN; latencias de primera ejecución y finalización
-   separadas; contadores de plazo perdido y esporádicas ignoradas acumuladas.
-6. `fail esp`: migración sin reiniciar el START del sobreviviente.
-7. Nodo sin eventos de tareas sigue vivo por heartbeat; silenciar solo TICK
-   detecta caída y provoca migración.
-8. ADD_TASK aplicado con ACK perdido: estado incierto, una sola transmisión
-   en ese nodo y ninguna repetición automática del efecto.
-9. SIGTERM cierra host/reporte sin STOP y deja nodos ejecutando.
-10. Consumidor suspendido y cola saturada: descartes explícitos, traza incompleta
-    y heartbeat atendido sin migración espuria.
-11. SIGKILL a un controlador: waitpid detecta falla y se migra.
-12. Ambos nodos sin TICK: rechazos explícitos, ningún destino caído.
-13. Esporádica del caído no migra; dos S se admiten en nodos distintos y una
-    tercera se rechaza con motivo.
-14. Firmware legacy sin CONFIGURE: nodo excluido antes de desplegar.
-15. Calibración cero: nodo excluido sin división por cero.
-16. STOP sin ACK: cierre acotado.
-17. Reporte suspendido durante el cierre: salida 1 por reporte parcial, señales
-    con límites y todos los hijos recogidos.
-18. Migración por criticidad vía protocolo: retiene criticidad 9, rechaza
-    criticidad 1 y conserva la tarea que ya ejecutaba el destino.
-19. Ambos conjuntos de experimentos con las dos políticas correspondientes.
-
-## Experimento EDF/RMS — sintético
-
-`examples/edf_vs_rms.csv`; calibraciones **ESP32=10, Pico=10 UT/tick**,
-tick 10 ms y First-Fit. Costos 5,5,4,4 y períodos/plazos 10 ticks.
-
-| Algoritmo | ESP32 | Pico | Rechazos |
-|---|---|---|---|
-| EDF | IDs 1,2; U=1 | IDs 3,4; U=0.8 | ninguno |
-| RMS | ID 1; U=0.5 | ID 2; U=0.5 | IDs 3,4 |
-
-RMS rechaza 0.5+0.4=0.9 porque n=2 da 2(sqrt(2)-1) ≈ 0.828427.
-EDF admite la carga completa; la prueba RMS del proyecto solo admite parte.
-Esto verifica admisión, no comportamiento temporal físico.
-
-## Experimento First-Fit/Worst-Fit — sintético
-
-`examples/ff_vs_wf.csv`; **ESP32=10, Pico=5 UT/tick**, EDF, tick 10 ms.
-Primera tarea W=40,T=10: C=4/8, U=0.4/0.8. Segunda W=10,T=10:
-C=1/2, U=0.1/0.2.
-
-| Heurística | ESP32 | Pico |
-|---|---|---|
-| First-Fit | IDs 1,2; U=0.5 | vacía; U=0 |
-| Worst-Fit | ID 1; U=0.4 | ID 2; U=0.2 |
-
-Worst-Fit coloca la primera en ESP32 (capacidad posterior 0.6 frente a 0.2).
-Para la segunda, Pico queda con 0.8 libre frente a 0.5 del ESP32 y gana Pico.
-**No se promete igual resultado con otras calibraciones.** Registrar valores
-reales de s_n y volver a comparar con ellos.
-
-## Pendiente con hardware
-
-- Compilar/cargar firmwares completos con PlatformIO, ausente aquí.
-- Ocho tareas por nodo, RMS/EDF y apropiación local al finalizar tick.
-- Calibración, margen y estabilidad con carga USB/LEDs.
-- Release/Run/Complete/Miss, pérdidas del búfer local e indicador de plazo.
-- Botones, interrupciones, debounce, intervalo mínimo y latencias físicas.
-- Inserción y migración sin alterar las demás tareas ni tick cero.
-- Autonomía sin host/SIGTERM y diferencia respecto de STOP con q.
-- Desfase real con GPIO/analizador frente a la cota de encolado/ACK.
-- Comportamiento DTR/reset específico de cada placa al abrir/cerrar USB.
-- Posible duplicación de ejecución entre nodo aislado y destino de migración.
-- Respuestas TE con evidencia real del equipo; no se inventan aquí.
+Compilar y cargar ambos firmwares actualizados; cerrar monitores seriales y
+seguir [HARDWARE_TEST.md](HARDWARE_TEST.md). Verificar botones/debounce, LEDs,
+margen de calibración, ocho tareas por nodo, carga USB, pérdida de plazos,
+inserción y migración, autonomía con alimentación independiente y desfase real.

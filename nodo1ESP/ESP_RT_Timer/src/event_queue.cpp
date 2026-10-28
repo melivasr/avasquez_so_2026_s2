@@ -1,5 +1,12 @@
 #include "lib/event_queue.h"
 
+// Anillo (búfer circular) de eventos en RAM. No tiene lock propio: quien lo
+// usa (event_tx.cpp) es responsable de protegerlo.
+//   head = donde se escribe el próximo evento
+//   tail = donde se lee el próximo evento
+//   count = cuántos hay guardados
+//   dropped = cuántos se perdieron por estar lleno
+
 void event_ring_init(EventRing *ring)
 {
     if (ring == nullptr) {
@@ -11,6 +18,9 @@ void event_ring_init(EventRing *ring)
     ring->dropped = 0;
 }
 
+// Si el anillo está lleno se descarta el evento nuevo (se conservan los más
+// viejos) y se cuenta en 'dropped'. Así el Gantt nunca tiene huecos en el
+// medio; en el peor caso se corta al final.
 bool event_ring_push(EventRing *ring, const EventRecord &record)
 {
     if (ring == nullptr) {
@@ -27,6 +37,10 @@ bool event_ring_push(EventRing *ring, const EventRecord &record)
     return true;
 }
 
+// Saca hasta EVENT_MAX_PER_FRAME eventos y los deja serializados en 'out' con
+// el formato de la carga de Event: [cantidad][registro x cantidad].
+// Cada registro mide 9 bytes: tipo(1) tick(4) id(2) arg(2), little endian.
+// Devuelve cuántos bytes escribió, o 0 si no hay nada o 'out' es muy chico.
 size_t event_ring_pop_payload(EventRing *ring, uint8_t *out, size_t out_capacity)
 {
     if (ring == nullptr || out == nullptr || ring->count == 0 ||
@@ -38,6 +52,7 @@ size_t event_ring_pop_payload(EventRing *ring, uint8_t *out, size_t out_capacity
     if (n > EVENT_MAX_PER_FRAME) {
         n = EVENT_MAX_PER_FRAME;
     }
+    // También se limita a lo que quepa en el búfer de salida.
     const size_t fit = (out_capacity - 1) / EVENT_RECORD_SIZE;
     if (n > fit) {
         n = fit;

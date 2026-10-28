@@ -42,6 +42,10 @@ static void test_valid()
     // W máximo de 32 bits y criticidad 0 se aceptan.
     CHECK(parse_task_line("3,P,4294967295,20,20,0", &t));
     CHECK(t.W == 4294967295u && t.criticality == 0);
+    CHECK(parse_task_line("3,P,1,10,10,-2147483648", &t));
+    CHECK(t.criticality == INT32_MIN);
+    CHECK(parse_task_line("3,P,1,10,10,2147483647", &t));
+    CHECK(t.criticality == INT32_MAX);
 
     // Límite de la línea: 95 caracteres se aceptan, 96 no (W rellena con ceros).
     const std::string s95 = "9,P," + std::string(82, '0') + "1,10,10,1";
@@ -77,6 +81,10 @@ static void test_rejected()
         "3,P,40,0,20,2",         // T = 0
         "3,P,40,20,0,2",         // D = 0
         "3,P,4294967296,20,20,2",   // desborda 32 bits
+        "3,P,1,10,10,2147483648",   // criticidad int32
+        "3,P,1,10,10,-2147483649",
+        "3,P,1,10,10,+1",
+        "3,P,1,10,10,-",
         "99999999999,P,1,1,1,1",    // 11 dígitos
         "a,P,40,20,20,2",        // id no numérico
     };

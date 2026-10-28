@@ -11,8 +11,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "../../../../common/rt_protocol.h"
 
-constexpr size_t TICK_REPORT_SIZE = 22;
+constexpr size_t TICK_REPORT_SIZE = RT_TICK_REPORT_SIZE;
 
 struct TickReportData {
     uint32_t tick;              // último tick procesado

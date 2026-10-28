@@ -1,5 +1,5 @@
 // CALENDARIZADOR 
-// Por ahora solo tareas periódicas. 
+// Tareas periódicas y esporádicas; apropiación a nivel de tick.
 
 #include "scheduler/scheduler.h"
 
@@ -17,6 +17,7 @@ static void add_event(TickDecision &decision, EventType type, uint32_t tick, uin
     decision.event_count++;
 }
 
+// Sin tareas ni calibración: configure() lo deja listo para START
 Scheduler::Scheduler(){
     count_ = 0;
     ut_per_tick_ = 0;
@@ -25,18 +26,33 @@ Scheduler::Scheduler(){
     sporadic_ignored_ = 0;
 }
 
+// Carga las tareas y deja el reloj y los trabajos en cero para START
 bool Scheduler::configure(const Task *tasks, size_t count, uint32_t ut_per_tick){
+    // demasiadas tareas o el nodo no está calibrado
     if (count > MAX_TASKS ||
         ut_per_tick == 0) {
         return false;
     }
 
-    // un período en 0 liberaría trabajos en cada tick para siempre
+    // Se valida toda la tabla antes de tocar el estado: si algo falla,
+    // queda la configuración anterior
+    if (count && !tasks) return false;
+    uint64_t reserved = 0;
     for (size_t i = 0; i < count; i++) {
-        if (tasks[i].T == 0) {
-            return false;
-        }
+        const Task &t = tasks[i];
+        if (!t.id || t.id > RT_MAX_TASK_ID || !t.W || !t.T || !t.D ||
+            (t.type != TaskType::Periodic && t.type != TaskType::Sporadic)) return false;
+        for (size_t j = 0; j < i; ++j)
+            if (tasks[j].id == t.id || (t.type == TaskType::Sporadic &&
+                tasks[j].type == TaskType::Sporadic)) return false;
+        // trabajos que la tarea puede tener activos a la vez
+        reserved += rt_job_reservation(t.T, t.D);
     }
+    if (reserved > RT_MAX_JOBS) return false;
+
+    // reloj y trabajos desde cero: el próximo tick es el 0
+    jobs_.clear();
+    clock_ = RtClock{};
 
     for (size_t i = 0; i < count; i++) {
         states_[i].task = tasks[i];
@@ -58,7 +74,39 @@ bool Scheduler::configure(const Task *tasks, size_t count, uint32_t ut_per_tick)
     return true;
 }
 
-TickDecision Scheduler::tick(uint32_t now){
+// Agrega una tarea con la ejecución en marcha
+bool Scheduler::add_task(const Task &task, uint32_t first_tick){
+    // mismas reglas que configure: tabla llena, campos en 0 o id fuera de rango
+    if (count_ >= MAX_TASKS || ut_per_tick_ == 0 || task.id == 0 ||
+        task.id > RT_MAX_TASK_ID || task.W == 0 || task.T == 0 || task.D == 0 ||
+        (task.type != TaskType::Periodic && task.type != TaskType::Sporadic)) {
+        return false;
+    }
+    // id repetido o una segunda esporádica
+    for (size_t i = 0; i < count_; ++i) {
+        if (states_[i].task.id == task.id ||
+            (task.type == TaskType::Sporadic && states_[i].task.type == TaskType::Sporadic)) {
+            return false;
+        }
+    }
+    // la reserva de trabajos tiene que seguir cabiendo con la nueva
+    uint64_t reserved = rt_job_reservation(task.T, task.D);
+    for (size_t i = 0; i < count_; ++i)
+        reserved += rt_job_reservation(states_[i].task.T, states_[i].task.D);
+    if (reserved > RT_MAX_JOBS) return false;
+    // la primera liberación es en first_tick (pasado a 64 bits sin
+    // avanzar el reloj), así mantiene la misma escala que las demás
+    TaskState &state = states_[count_++];
+    state = TaskState{};
+    state.task = task;
+    state.next_release = clock_.peek(first_tick);
+    return true;
+}
+
+// Procesa un tick: plazos, liberaciones, botón, elección y trabajo
+TickDecision Scheduler::tick(uint32_t raw_tick){
+    // los cálculos usan el tick en 64 bits; los eventos llevan raw_tick
+    const uint64_t now = clock_.observe(raw_tick);
     TickDecision decision;
     decision.task_id = NO_TASK;
     decision.units = 0;
@@ -67,20 +115,13 @@ TickDecision Scheduler::tick(uint32_t now){
     decision.released_count = 0;
     decision.event_count = 0;
 
-    // Abortar las tareas que llegaron a su plazo sin terminar.
-    for (size_t i = 0; i < count_; i++) {
-        TaskState &state = states_[i];
-
-        if (!state.pending ||
-            now < state.deadline) {
-            continue;
-        }
-
-        state.pending = false;
-        state.remaining = 0;
-        decision.missed[decision.missed_count] = state.task.id;
-        decision.missed_count++;
-        add_event(decision, EventType::Miss, now, state.task.id, state.job_seq);
+    // Cada trabajo vence por su propio plazo, aunque haya otros del mismo ID.
+    for (auto &job : jobs_.jobs) {
+        if (!job.active || now < job.deadline) continue;
+        const Task &task = states_[job.slot].task;
+        job.active = false;
+        decision.missed[decision.missed_count++] = task.id;
+        add_event(decision, EventType::Miss, raw_tick, task.id, job.sequence);
     }
 
     // Liberar las tareas periódicas que tocan en este tick
@@ -96,22 +137,23 @@ TickDecision Scheduler::tick(uint32_t now){
 
         // la próxima liberación mantiene la fase: si se saltaron ticks,
         // se avanza de a T hasta pasar el tick actual
-        do {
-            state.next_release += state.task.T;
-        } while (state.next_release <= now);
+        state.next_release += ((now - state.next_release) / state.task.T + 1) * state.task.T;
     }
 
     // Pulsaciones de la tarea esporádica (después de las periódicas)
     handle_presses(now, decision);
 
-    // Elegir la tarea pendiente de mayor prioridad
+    // Elegir la tarea pendiente de mayor prioridad. Cada tarea compite con
+    // su trabajo más antiguo (el que se ejecuta primero)
     TaskState *chosen = nullptr;
     for (size_t i = 0; i < count_; i++) {
         TaskState &state = states_[i];
 
-        if (!state.pending) {
-            continue;
-        }
+        RtJob *head = jobs_.first(i);
+        state.pending = head != nullptr;
+        if (!head) continue;
+        state.remaining = head->remaining;
+        state.deadline = head->deadline;
         if (chosen == nullptr ||
             has_priority(state, *chosen)) {
             chosen = &state;
@@ -121,7 +163,7 @@ TickDecision Scheduler::tick(uint32_t now){
     // si cambia la tarea en ejecución se avisa (arg = la anterior)
     const uint32_t chosen_id = (chosen != nullptr) ? chosen->task.id : NO_TASK;
     if (chosen_id != running_id_) {
-        add_event(decision, EventType::Switch, now, chosen_id, running_id_);
+        add_event(decision, EventType::Switch, raw_tick, chosen_id, running_id_);
         running_id_ = chosen_id;
     }
 
@@ -130,36 +172,44 @@ TickDecision Scheduler::tick(uint32_t now){
         return decision;
     }
 
-    // Ejecutar un tick de trabajo 
+    // Los trabajos de un mismo ID se ejecutan en orden de liberación.
+    // Se ejecuta lo que cabe en un tick, o lo que falte si es menos
+    RtJob *job = jobs_.first((size_t)(chosen - states_));
     uint32_t units = ut_per_tick_;
     if (chosen->remaining < units) {
         units = chosen->remaining;
     }
     chosen->remaining -= units;
+    job->remaining -= units;
 
     decision.task_id = chosen->task.id;
     decision.units = units;
 
     // terminó: la marca es el final de este tick
     if (chosen->remaining == 0) {
-        chosen->pending = false;
+        // libera su lugar; si hay otro trabajo de la misma tarea, sigue pendiente
+        job->active = false;
+        chosen->pending = jobs_.first((size_t)(chosen - states_)) != nullptr;
         decision.completed = true;
-        add_event(decision, EventType::Complete, now + 1, chosen->task.id, chosen->job_seq);
+        add_event(decision, EventType::Complete, raw_tick + 1, chosen->task.id, job->sequence);
     }
 
     return decision;
 }
 
+// Tareas cargadas
 size_t Scheduler::count() const{
     return count_;
 }
 
+// Suma pulsaciones para atenderlas en el próximo tick
 void Scheduler::sporadic_press(uint32_t presses){
     // se topa en vez de dar la vuelta
     const uint32_t room = 0xFFFFFFFFU - pending_presses_;
     pending_presses_ += (presses < room) ? presses : room;
 }
 
+// Hay una tarea esporádica entre las cargadas
 bool Scheduler::has_sporadic() const{
     for (size_t i = 0; i < count_; i++) {
         if (states_[i].task.type == TaskType::Sporadic) {
@@ -169,31 +219,26 @@ bool Scheduler::has_sporadic() const{
     return false;
 }
 
+// Pulsaciones ignoradas desde configure
 uint32_t Scheduler::sporadic_ignored() const{
     return sporadic_ignored_;
 }
 
-void Scheduler::release_job(TaskState &state, uint32_t now, TickDecision &decision){
-    // la tarea anterior sigue sin terminar (con D > T o una esporádica
-    // liberada de nuevo) y no se mantienen dos a la vez: se aborta
-    if (state.pending) {
-        decision.missed[decision.missed_count] = state.task.id;
-        decision.missed_count++;
-        add_event(decision, EventType::Miss, now, state.task.id, state.job_seq);
-    }
-
+// Crea el trabajo con plazo now + D y W UT por hacer, y avisa RELEASE
+// (arg = número de trabajo)
+void Scheduler::release_job(TaskState &state, uint64_t now, TickDecision &decision){
+    RtJob *job = jobs_.push((size_t)(&state - states_), state.job_seq + 1,
+                            now, state.task.D, state.task.W);
+    if (!job) return; // La reserva de la tabla se comprobó antes de desplegar.
     state.job_seq++;
-    state.pending = true;
-    state.remaining = state.task.W;
-    state.deadline = now + state.task.D;
     state.release_tick = now;
-
-    decision.released[decision.released_count] = state.task.id;
-    decision.released_count++;
-    add_event(decision, EventType::Release, now, state.task.id, state.job_seq);
+    decision.released[decision.released_count++] = state.task.id;
+    add_event(decision, EventType::Release, (uint32_t)now, state.task.id, state.job_seq);
 }
 
-void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
+// Cada pulsación libera la esporádica si ya pasó su intervalo mínimo;
+// si no, se ignora y se cuenta
+void Scheduler::handle_presses(uint64_t now, TickDecision &decision){
     if (pending_presses_ == 0) {
         return;
     }
@@ -217,7 +262,7 @@ void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
         if (sporadic == nullptr) {
             sporadic_ignored_++;
             if (with_event) {
-                add_event(decision, EventType::SporadicIgnored, now, NO_TASK, SCHED_IGNORED_NO_TASK);
+                add_event(decision, EventType::SporadicIgnored, (uint32_t)now, NO_TASK, SCHED_IGNORED_NO_TASK);
             }
             continue;
         }
@@ -232,7 +277,7 @@ void Scheduler::handle_presses(uint32_t now, TickDecision &decision){
         } else {
             sporadic_ignored_++;
             if (with_event) {
-                add_event(decision, EventType::SporadicIgnored, now, sporadic->task.id, SCHED_IGNORED_MIN_INTERVAL);
+                add_event(decision, EventType::SporadicIgnored, (uint32_t)now, sporadic->task.id, SCHED_IGNORED_MIN_INTERVAL);
             }
         }
     }

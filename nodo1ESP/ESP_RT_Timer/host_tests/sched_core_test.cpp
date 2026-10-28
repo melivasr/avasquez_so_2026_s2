@@ -289,12 +289,11 @@ static void test_deadline_longer_than_period()
     add(&s, mk(1, 'P', 40, 2, 6, 1));   // C=4 > T=2
     run(&s, 3);
     std::vector<SchedEvent> miss = only(r, SchedEventType::Miss);
-    CHECK(!miss.empty());
-    if (!miss.empty()) {
-        CHECK(miss[0].tick == 2);
-        CHECK(miss[0].id == 1);
-        CHECK(miss[0].arg == 1); // abortó el trabajo n.º 1
-    }
+    CHECK(miss.empty());
+    run(&s, 1);
+    std::vector<SchedEvent> done = only(r, SchedEventType::Complete);
+    CHECK(done.size() == 1 && done[0].tick == 4 && done[0].arg == 1);
+
 }
 
 static void test_sporadic_not_auto_released()
@@ -458,7 +457,7 @@ static void test_sporadic_with_periodic()
     CHECK(s.miss_count == 0);
 }
 
-static void test_sporadic_overlap_aborts()
+static void test_sporadic_overlap_preserved()
 {
     printf("esporádica con trabajo aún activo (D > T)\n");
     Recorder r;
@@ -469,12 +468,13 @@ static void test_sporadic_overlap_aborts()
     run(&s, 1);                              // tick 0: libera, ejecuta 1 tramo
     run(&s, 1);                              // tick 1
     sched_sporadic_press(&s, 1);
-    run(&s, 1);                              // tick 2: 2-0 >= 2 -> permitido, aborta el activo
+    run(&s, 1);                              // tick 2: se encola sin abortar el trabajo activo
     std::vector<SchedEvent> miss = only(r, SchedEventType::Miss);
-    CHECK(miss.size() == 1);
-    if (!miss.empty()) {
-        CHECK(miss[0].tick == 2 && miss[0].id == 1 && miss[0].arg == 1);
-    }
+    CHECK(miss.empty());
+    run(&s, 17);
+    std::vector<SchedEvent> done = only(r, SchedEventType::Complete);
+    CHECK(done.size() == 2 && done[0].tick == 10 && done[0].arg == 1 &&
+          done[1].tick == 20 && done[1].arg == 2);
     std::vector<SchedEvent> rel = of_id(r.events, SchedEventType::Release, 1);
     CHECK(rel.size() == 2 && rel[1].tick == 2 && rel[1].arg == 2);
 }
@@ -526,7 +526,7 @@ int main()
     test_press_without_sporadic_task();
     test_press_event_cap_and_saturation();
     test_sporadic_with_periodic();
-    test_sporadic_overlap_aborts();
+    test_sporadic_overlap_preserved();
     test_add_sporadic_while_running();
 
     printf("\n%d comprobaciones, %d fallos\n", g_checks, g_failed);
