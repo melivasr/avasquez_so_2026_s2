@@ -1,0 +1,12 @@
+id,tipo,W,T,D,criticidad
+# 7 periodicas + 1 esporadica, todas en Pico. C en Pico: 1->2, 2->3, 3->1,
+# 4->2, 5->1, 6->3, 7->1, 8->2 ticks. U decreciente con el id: LEDs = id.
+# La 8 se libera con el boton de Pico o con trigger 8 (intervalo 40 ticks).
+1,P,3800,10,10,1
+2,P,6000,20,20,1
+3,P,1800,8,8,1
+4,P,3800,18,18,1
+5,P,1800,10,10,1
+6,P,6000,36,36,1
+7,P,1800,14,14,1
+8,S,3800,40,40,2

@@ -1,0 +1,4 @@
+node,id,type,W,T,D,criticality,C,releases,run_ticks,completed,deadline_misses,sporadic_ignored,first_samples,mean_first_ticks,completion_samples,mean_completion_ticks,max_completion_ticks
+1,1,P,6000,10,2,1,3,24,48,0,24,0,24,0.000,0,,
+1,2,P,3800,15,15,1,2,16,32,16,0,0,16,1.500,16,3.500,5
+1,3,P,1800,10,10,1,1,24,24,24,0,0,24,2.000,24,3.000,3

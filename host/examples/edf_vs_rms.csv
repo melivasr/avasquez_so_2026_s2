@@ -1,0 +1,12 @@
+id,tipo,W,T,D,criticidad
+# Referencia HW: ESP32=70 y Pico=105 UT/tick; D=T, sin botones.
+# Ocho tareas: EDF admite todas con First-Fit; RMS rechaza IDs 6, 7 y 8.
+# EDF: Pico=1,2; ESP32=3..8. Ver docs/EXPERIMENTS.md.
+1,P,180,5,5,1
+2,P,380,7,7,1
+3,P,90,12,12,1
+4,P,90,14,14,1
+5,P,90,15,15,1
+6,P,90,16,16,1
+7,P,90,18,18,1
+8,P,90,20,20,1
