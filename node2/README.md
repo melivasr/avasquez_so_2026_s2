@@ -21,7 +21,7 @@ pio run -d node2 -e pico -t upload
 Cerrar el monitor serial antes de arrancar el host. El archivo platformio.ini
 selecciona el núcleo Earle Philhower y una Raspberry Pi Pico RP2040.
 
-LEDs de ranura: GP10..GP13; plazo perdido: GP14; botón a GND en GP15 con pull-up.
+LEDs del ID de la tarea en ejecución: GP10..GP13; plazo perdido: GP14; botón a GND en GP15 con pull-up.
 El [flujo de prueba física](../host/docs/HARDWARE_TEST.md) explica la integración.
 `make -C host test` verifica módulos puros y ejecuta este firmware con interfaces
 USB/reloj/GPIO sustituidas en Linux; no valida el BSP ni hardware físico.

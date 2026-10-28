@@ -66,6 +66,28 @@ static Stat *find_stat(Stat *stats,size_t *n,uint32_t id,int node) {
     return p;
 }
 
+// Posición de la tarea en el CSV de entrada; las ausentes van al final.
+static size_t arrival(const Task *order,size_t m,uint32_t id) {
+    for(size_t i=0;i<m;i++)if(order[i].id==id)return i;
+    return m;
+}
+
+// Ordena por llegada (fila del CSV), luego ID y nodo, para que T1 encabece el reporte.
+static void sort_arrival(Stat *stats,size_t n,const Task *order,size_t m) {
+    for(size_t i=1;i<n;i++) {
+        Stat v=stats[i];
+        size_t rv=arrival(order,m,v.id),j=i;
+        while(j) {
+            const Stat *p=&stats[j-1];
+            size_t rp=arrival(order,m,p->id);
+            if(rp<rv || (rp==rv && (p->id<v.id || (p->id==v.id && p->node<=v.node))))break;
+            stats[j]=stats[j-1];
+            j--;
+        }
+        stats[j]=v;
+    }
+}
+
 // La traza conserva el cursor y la tarea seleccionada hasta un nuevo evento.
 typedef struct {
     uint64_t cursor;
@@ -286,7 +308,9 @@ static const char *const PAGE_SCRIPT[]= {
     "function S(t,a,p){const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e;}\n",
     "function H(t,c,txt){const e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e;}\n",
     "const last=new Map();for(const d of R.dec)if(d.k!==5)last.set(d.id,d);\n",
-    "const finals=[...last.values()].sort(function(p,q){return p.id-q.id;});\n",
+    "const rank=new Map(R.ord.map(function(id,i){return [id,i];}));\n",
+    "function byArrival(a,b){const x=rank.has(a)?rank.get(a):Infinity,y=rank.has(b)?rank.get(b):Infinity;return x-y||a-b;}\n",
+    "const finals=[...last.values()].sort(function(p,q){return byArrival(p.id,q.id);});\n",
     "const nAcc=finals.filter(function(d){return d.k===1;}).length,nRej=finals.filter(function(d){return d.k===3;}).length;\n",
     "const completed=R.tasks.reduce((sum,t)=>sum+t.comp,0),missed=R.tasks.reduce((sum,t)=>sum+t.miss,0);\n",
     "const metrics=[['Tareas aceptadas',nAcc,nRej+' rechazadas · '+finals.length+' recibidas'],['Trabajos completados',completed,'Finalizaciones registradas'],['Fallas de plazo',missed,'Eventos MISS registrados'],['Cambios de tarea',R.util.reduce((sum,u)=>sum+u.sw,0),'Entradas a tareas distintas']];\n",
@@ -316,7 +340,7 @@ static const char *const PAGE_SCRIPT[]= {
     "  const tasks=R.tasks.filter(t=>t.n===n),byId=new Map(tasks.map(t=>[t.id,t]));\n",
     "  const iv=R.iv[n],mk=R.mk[n],ids=new Set(tasks.map(t=>t.id));\n",
     "  for(let i=0;i<iv.length;i+=3)ids.add(iv[i]);\n",
-    "  const lanes=[...ids].sort((a,b)=>a-b);\n",
+    "  const lanes=[...ids].sort(byArrival);\n",
     "  for(let i=0;i<mk.length;i+=4)if(mk[i]===5&&mk[i+1]===0){lanes.push(0);break;}\n",
     "  const lane=new Map(lanes.map((id,i)=>[id,i])),end=Math.max(R.util[n].end,1);\n",
     "  const sec=root.appendChild(H('section','card node-card'));\n",
@@ -449,7 +473,7 @@ static const char *const PAGE_SCRIPT[]= {
     "\n",
     "document.getElementById('stats').append(table(\n",
     "  [['Nodo'],['Tarea'],['Tipo'],['C'],['T'],['D'],['C/T'],['Liberaciones'],['Ticks ejecutados'],['Completadas'],['Fallas de plazo'],['Esporádicas ignoradas'],['Latencia 1ª ejecución'],['Respuesta media'],['Respuesta máx.']],\n",
-    "  R.tasks.slice().sort(function(p,q){return p.n-q.n||p.id-q.id;}).map(function(t){\n",
+    "  R.tasks.map(function(t){\n",
     "    return [R.nodes[t.n],'T'+t.id,t.ty==='S'?'Esporádica':'Periódica',t.C,t.T,t.D,t.T?(t.C/t.T).toFixed(3):'—',t.rel,t.run,t.comp,\n",
     "      t.miss?H('span','bad','✕ '+t.miss):'0',t.ign,fixed(t.f,2),fixed(t.c,2),t.cm==null?'—':t.cm];})),\n",
     "  H('p','muted','Tiempos en ticks del nodo. Latencia 1ª ejecución = inicio de la primera ejecución − liberación; tiempo de respuesta = finalización − liberación (media y máximo sobre trabajos correlacionables).'));\n",
@@ -480,11 +504,13 @@ static void put_lines(FILE *f,const char *const *lines,size_t count) {
 
 // Une datos y plantilla; U medida es ticks ocupados reconstruidos / ticks observados.
 static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const Stat *stats,size_t n,
-                       const long double theoretical[NODES],const uint64_t busy[NODES],const uint64_t end_tick[NODES],
+                       const Task *order,size_t m,const long double theoretical[NODES],const uint64_t busy[NODES],const uint64_t end_tick[NODES],
                        const uint64_t switches[NODES],uint32_t counters[NODES][5],const bool incomplete[NODES],
                        const uint64_t dropped[3]) {
     put_lines(html,PAGE_HEAD,sizeof PAGE_HEAD/sizeof *PAGE_HEAD);
-    fprintf(html,"<script>\nconst R={nodes:['ESP32','Pico'],drop:%"PRIu64",\nutil:[",dropped[2]);
+    fprintf(html,"<script>\nconst R={nodes:['ESP32','Pico'],drop:%"PRIu64",\nord:[",dropped[2]);
+    for(size_t i=0;i<m;i++)fprintf(html,"%"PRIu32",",order[i].id);
+    fputs("],\nutil:[",html);
     for(int i=0;i<NODES;i++) {
         fprintf(html,"{th:%.6Lf,obs:%.6Lf,part:%d,sw:%"PRIu64",end:%"PRIu64",drop:%"PRIu64",cnt:[%u,%u,%u,%u,%u]},",
                 // La carga teórica es la final; la medida resume el horizonte observado, incluso si hubo migración.
@@ -729,6 +755,12 @@ int report_run(Shared *s,const Config *c) {
         incomplete[1]=true;
     }
     for(int i=0;i<2;i++)if(dropped[i] || dropped[2])incomplete[i]=true;
+    // Relee el CSV solo para conocer el orden de llegada; si falla, queda el orden por ID.
+    Task *order=malloc(TASK_CAP*sizeof *order);
+    size_t m=0;
+    char why[256];
+    if(!order || !task_load(c->tasks,order,&m,why,sizeof why))m=0;
+    sort_arrival(stats,n,order,m);
     fprintf(statsfile,"node,id,type,W,T,D,criticality,C,releases,run_ticks,completed,deadline_misses,sporadic_ignored,first_samples,mean_first_ticks,completion_samples,mean_completion_ticks,max_completion_ticks\n");
     for(size_t i=0;i<n;i++) {
         Stat *p=&stats[i];
@@ -741,7 +773,8 @@ int report_run(Shared *s,const Config *c) {
     }
 
     // Con todos los datos consumidos, genera el HTML y cierra archivos comprobando errores de salida.
-    write_html(html,gantt,marks,decisions,stats,n,theoretical,busy,end_tick,switches,counters,incomplete,dropped);
+    write_html(html,gantt,marks,decisions,stats,n,order,m,theoretical,busy,end_tick,switches,counters,incomplete,dropped);
+    free(order);
     fclose(marks);
     fclose(decisions);
     bool bad=ferror(events)||ferror(gantt)||ferror(statsfile)||ferror(html);

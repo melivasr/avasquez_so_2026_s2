@@ -143,17 +143,6 @@ static void handle_deploy_tasks(const Frame *frame){
     send_ack(frame, StatusCode::Ok);
 }
 
-// La tarea según su posición;
-// 0 si no hay tarea. Es lo que muestran los LEDs.
-static uint32_t slot_for_id(uint32_t task_id){
-    for (size_t i = 0; i < task_count; i++) {
-        if (tasks[i].id == task_id) {
-            return (uint32_t)(i + 1);
-        }
-    }
-    return 0;
-}
-
 // Procesa el tick indicado: calendarizador, trabajo y eventos
 static void process_tick(uint32_t now){
     // las pulsaciones nuevas del botón se atienden en este tick
@@ -178,7 +167,7 @@ static void process_tick(uint32_t now){
         usb_add_event(event.type, event.tick, event.task_id, event.value);
 
         if (event.type == EventType::Switch) {
-            hardware_show_slot(slot_for_id(event.task_id));
+            hardware_show_slot(event.task_id); // ID de la tarea en ejecución; 0 = ocioso
         } else if (event.type == EventType::Miss) {
             hardware_set_miss(true);
             miss_lit = true;

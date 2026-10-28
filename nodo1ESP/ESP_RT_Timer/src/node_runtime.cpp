@@ -37,7 +37,7 @@ extern "C" void unidad_trabajo(void);
 // Hardware
 // ----------------------------------------------------------------
 
-// LEDs de la tarea en ejecución: índice de ranura en binario,
+// LEDs de la tarea en ejecución: su ID en binario (0 = ocioso),
 // bit 0 en GPIO 18 (menos significativo) hasta bit 3 en GPIO 22.
 static constexpr gpio_num_t LED_SLOT_PINS[4] = {
     GPIO_NUM_18, GPIO_NUM_19, GPIO_NUM_21, GPIO_NUM_22};
@@ -217,17 +217,6 @@ static void feed_presses()
     }
 }
 
-// Ranura (1..8) de una tarea según su posición en la tabla; 0 = ocioso.
-static uint32_t slot_for_id(uint16_t id)
-{
-    for (size_t i = 0; i < g_sched.count; ++i) {
-        if (g_sched.slots[i].task.id == id) {
-            return static_cast<uint32_t>(i + 1);
-        }
-    }
-    return 0;
-}
-
 // ----------------------------------------------------------------
 // Callbacks del núcleo
 // ----------------------------------------------------------------
@@ -244,7 +233,7 @@ static void on_sched_event(const SchedEvent *event, void *ctx)
                   event->id, event->arg);
 
     if (event->type == SchedEventType::Switch) {
-        show_slot(slot_for_id(event->id));
+        show_slot(event->id); // con 4 LEDs se ven los 4 bits bajos del ID
     } else if (event->type == SchedEventType::Miss) {
         gpio_set_level(LED_MISS_PIN, 1); // se queda encendido hasta el próximo Start
     }

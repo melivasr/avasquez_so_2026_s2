@@ -1,0 +1,10 @@
+id,tipo,W,T,D,criticidad
+# EDF. Despliegue en orden 1, 3, 2 (utilización decreciente).
+# First-Fit: Pico 1,2 (U=0,967) y ESP32 3 (U=0,625).
+# Worst-Fit: Pico 1 (U=0,800) y ESP32 3,2 (U=0,875).
+# Luego, en el host: add 4,P,3800,8,8,1   y   add 5,P,1800,5,5,1
+# First-Fit admite la 4 en ESP32 (U=1) y rechaza la 5.
+# Worst-Fit rechaza la 4 y admite la 5 en Pico (U=1).
+1,P,8000,5,5,1
+2,P,3800,12,12,1
+3,P,6000,8,8,1
