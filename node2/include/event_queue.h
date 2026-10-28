@@ -1,3 +1,4 @@
+// Eventos que el nodo le reporta al host y la cola donde esperan su envío.
 #pragma once
 
 #include <stddef.h>
@@ -29,11 +30,15 @@ struct NodeEvent {
     uint16_t value; // dato extra según el tipo ("arg")
 };
 
+// Cola circular de tamaño fijo (sin memoria dinámica). La llena el tick
+// y la vacía usb_send_events en lotes.
 class EventQueue {
 public:
     EventQueue();
 
+    // Agrega al final. Devuelve false si está llena (el evento no entra).
     bool push(const NodeEvent &item);
+    // Saca el más antiguo. Devuelve false si está vacía.
     bool pop(NodeEvent &item);
 
     bool empty() const;
@@ -45,5 +50,5 @@ private:
     NodeEvent buffer_[EVENT_QUEUE_CAPACITY];
     size_t head_; // siguiente posicion para escribir
     size_t tail_; // siguiente posicion para leer
-    size_t count_;
+    size_t count_; // eventos guardados
 };

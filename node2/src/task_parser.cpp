@@ -34,6 +34,7 @@ static bool parse_number(const char *text, uint32_t *value){
     return true;
 }
 
+// Pasa la criticidad a número. Acepta un "-" al inicio y debe caber en int32.
 static bool parse_criticality(const char *text, int32_t *value){
     const char *digits = text;
     if (*digits == '-') ++digits;
@@ -48,10 +49,13 @@ static bool parse_criticality(const char *text, int32_t *value){
     return true;
 }
 
+// Lee una línea "id,tipo,W,T,D,criticidad"; si está mal no toca task
 bool parse_task_line(const char *line, size_t length, Task *task){
+    // un '\0' en medio cortaría la línea antes de tiempo
     if (line == nullptr || task == nullptr || memchr(line, '\0', length)) {
         return false;
     }
+    // línea con fin de línea de Windows (\r\n)
     if (length > 0 &&
         line[length - 1] == '\r') {
         length--;
@@ -127,6 +131,7 @@ bool parse_task_line(const char *line, size_t length, Task *task){
     return true;
 }
 
+// Lee todas las líneas del DEPLOY y revisa ids repetidos y esporádicas
 bool parse_task_list(const char *text, size_t length, Task *tasks, size_t capacity, size_t *count){
     size_t total = 0;
     size_t sporadic = 0;

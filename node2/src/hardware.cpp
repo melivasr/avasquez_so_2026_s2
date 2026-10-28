@@ -33,6 +33,7 @@ static void on_button_edge(){
     }
 }
 
+// LEDs como salida y apagados; botón con pull-up e interrupción en ambos flancos
 void hardware_setup(){
     for (uint8_t i = 0; i < 4; i++) {
         pinMode(LED_SLOT_PINS[i], OUTPUT);
@@ -47,17 +48,23 @@ void hardware_setup(){
     attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), on_button_edge, CHANGE);
 }
 
+// Cada bit del valor va a su LED: bit 0 en GP10 ... bit 3 en GP13.
+// Solo se ven los 4 bits bajos (IDs 1..15).
 void hardware_show_slot(uint32_t slot){
     for (uint32_t bit = 0; bit < 4; bit++) {
         digitalWrite(LED_SLOT_PINS[bit], (slot >> bit) & 1U);
     }
 }
 
+// LED de plazo perdido en GP14
 void hardware_set_miss(bool on){
     digitalWrite(LED_MISS_PIN, on);
 }
 
+// Diferencia entre lo que contó la interrupción y lo ya entregado.
+// La resta sin signo sigue funcionando si el contador da la vuelta.
 uint32_t hardware_take_presses(){
+    // una sola lectura: la interrupción puede sumar mientras tanto
     const uint32_t presses = button_presses;
     const uint32_t fresh = presses - seen_presses;
     seen_presses = presses;

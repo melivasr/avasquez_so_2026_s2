@@ -1,3 +1,8 @@
+// ESTADO DEL NODO
+// Atiende los mensajes del host según el estado (sin calibrar, calibrado,
+// configurado, corriendo, detenido) y procesa cada tick: calendarizador,
+// unidades de trabajo, eventos, LEDs y TICK_REPORT.
+
 #include <Arduino.h>
 
 #include "node.h"
@@ -14,6 +19,7 @@ extern "C" {
 }
 
 // Cada cuántos ticks cambia el LED (50 x 10 ms = medio segundo)
+// (LED integrado de la placa, solo para ver que los ticks avanzan)
 #define LED_EVERY_TICKS 50U
 
 // Rango aceptado para el tick: 1 ms a 1 s
@@ -52,6 +58,7 @@ static SchedulerRms scheduler_rms;
 static SchedulerEdf scheduler_edf;
 static Scheduler *scheduler = nullptr;
 
+// Estado del LED integrado (parpadeo de vida)
 static bool led = false;
 
 // El LED de plazo perdido se enciende con cada MISS y se apaga solo
@@ -124,6 +131,7 @@ static void handle_deploy_tasks(const Frame *frame){
         return;
     }
 
+    // las tareas no caben en la tabla de 64 trabajos activos
     if (!rt_jobs_fit(pending, count)) {
         send_ack(frame, StatusCode::Error);
         return;
@@ -211,15 +219,20 @@ static void report_if_due(uint32_t now){
 }
 
 // ADD_TASK: agrega entre ticks sin reemplazar las tareas anteriores.
+// Se puede usar detenido (queda para el próximo START) o corriendo.
 static void handle_add_task(const Frame *frame){
+    // la línea puede venir con '\n' al final
     size_t length = frame->length;
     if (length > 0 && frame->payload[length - 1] == '\n') --length;
+
+    // tabla llena o línea mal escrita
     Task task = {};
     if (task_count >= MAX_TASKS ||
         !parse_task_line((const char *)frame->payload, length, &task)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
+    // id repetido o una segunda esporádica
     for (size_t i = 0; i < task_count; ++i) {
         if (tasks[i].id == task.id ||
             (task.type == TaskType::Sporadic && tasks[i].type == TaskType::Sporadic)) {
@@ -227,10 +240,14 @@ static void handle_add_task(const Frame *frame){
             return;
         }
     }
+    // con la nueva no alcanzarían los 64 trabajos reservados
     if (!rt_jobs_fit(tasks, task_count, &task)) {
         send_ack(frame, StatusCode::Error);
         return;
     }
+
+    // corriendo: entra al calendarizador desde el tick actual y se avisa
+    // al host con TASK_ADDED (arg = ranura que ocupa, 1..8)
     if (state == NodeState::Running) {
         if (!scheduler->add_task(task, tick_count)) {
             send_ack(frame, StatusCode::Error);
@@ -239,6 +256,7 @@ static void handle_add_task(const Frame *frame){
         usb_add_event(EventType::TaskAdded, tick_count, (uint16_t)task.id,
                       (uint16_t)(task_count + 1));
     }
+    // también queda en la tabla para los próximos START
     tasks[task_count++] = task;
     send_ack(frame, StatusCode::Ok);
 }
@@ -278,6 +296,7 @@ static void handle_start(const Frame *frame){
         return;
     }
 
+    // contadores y colas desde cero para esta ejecución
     scheduler = chosen;
     report_ticks = requested_report_ticks;
     next_report = requested_report_ticks;
@@ -288,6 +307,7 @@ static void handle_start(const Frame *frame){
     usb_reset_counters();
     usb_clear_events();
 
+    // LEDs apagados; las pulsaciones previas a START se descartan
     hardware_show_slot(0);
     hardware_set_miss(false);
     miss_lit = false;
@@ -361,6 +381,7 @@ static void handle_sporadic_release(const Frame *frame){
     send_ack(frame, StatusCode::Ok);
 }
 
+// Se llama una vez desde setup()
 void node_setup(){
     pinMode(LED_BUILTIN, OUTPUT);
 
@@ -368,6 +389,7 @@ void node_setup(){
     hardware_setup();
 }
 
+// Envía cada trama a su manejador según el tipo
 void node_handle_frame(const Frame *frame){
     if (frame->type == (uint8_t)MessageType::CalibrateReq) {
         handle_calibrate_req(frame);
@@ -403,7 +425,7 @@ void node_handle_frame(const Frame *frame){
     send_ack(frame, StatusCode::NotImplemented);
 }
 
-
+// Se llama en cada vuelta de loop(); procesa a lo sumo un tick
 void node_tick(){
     // solo con el calendarizador corriendo
     if (state != NodeState::Running) {
@@ -428,7 +450,6 @@ void node_tick(){
     }
 
     // se atrasó: los ticks que faltaron se cuentan y se salta al actual
-    // 
     if (reached != tick_count) {
         const uint32_t lost = reached - tick_count;
         ticks_lost += lost;
@@ -450,6 +471,7 @@ void node_tick(){
     report_if_due(now);
 }
 
+// Próximo tick a procesar
 uint32_t node_tick_count(){
     return tick_count;
 }

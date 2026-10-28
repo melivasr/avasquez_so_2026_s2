@@ -1,3 +1,5 @@
+// Calendarizador base: lo común a RMS y EDF. Cada uno solo define
+// has_priority, es decir, cuál de dos tareas pendientes corre primero.
 #pragma once
 
 #include <stddef.h>
@@ -72,6 +74,7 @@ public:
     // se atienden en el próximo tick
     void sporadic_press(uint32_t presses);
 
+    // Tareas cargadas
     size_t count() const;
 
     // true si hay una tarea esporádica cargada
@@ -92,10 +95,10 @@ private:
     void handle_presses(uint64_t now, TickDecision &decision);
 
     TaskState states_[MAX_TASKS];
-    RtJobs jobs_;
-    RtClock clock_;
-    size_t count_;
-    uint32_t ut_per_tick_;
+    RtJobs jobs_; // trabajos activos de todas las tareas (tabla fija de RT_MAX_JOBS)
+    RtClock clock_; // extiende el tick de 32 bits a 64 bits
+    size_t count_; // tareas cargadas en states_
+    uint32_t ut_per_tick_; // UT que se ejecutan en un tick (s_n)
     uint32_t running_id_; // tarea que corrió en el tick anterior (NO_TASK = ocioso)
     uint32_t pending_presses_; // pulsaciones sin atender
     uint32_t sporadic_ignored_; // pulsaciones ignoradas desde configure

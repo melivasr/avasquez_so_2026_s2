@@ -44,6 +44,8 @@ static bool last_pending = false;
 static Frame replies[8];
 static size_t reply_head = 0, reply_count = 0;
 
+// Codifica y escribe la trama solo si cabe entera en el búfer de TinyUSB,
+// así Serial.write nunca se queda esperando. Devuelve false si no se envió.
 static bool write_now(const Frame *frame){
     static uint8_t out[FRAME_MAX_SIZE];
 
@@ -58,8 +60,11 @@ static bool write_now(const Frame *frame){
     return Serial.write(out, size) == size;
 }
 
+// Envía una respuesta de control ya, o la deja en cola si no cabe
 void usb_send(const Frame *frame){
+    // si ya hay respuestas en cola, esta va detrás para no cambiar el orden
     if (reply_count == 0 && write_now(frame)) return;
+    // con la cola llena la respuesta se descarta
     if (reply_count < 8) {
         replies[(reply_head + reply_count) % 8] = *frame;
         ++reply_count;
@@ -75,6 +80,7 @@ static void count_receiver_errors(){
     counted_length_errors = receiver.length_errors();
 }
 
+// Lee los bytes disponibles hasta completar una trama, sin esperar
 bool usb_receive(Frame *frame){
     // Procesar solo los bytes que ya llegaron (no se queda esperando)
     size_t budget = FRAME_MAX_SIZE;
@@ -101,6 +107,7 @@ bool usb_receive(Frame *frame){
     return false;
 }
 
+// Pone un evento en la cola de envío
 void usb_add_event(EventType type, uint32_t tick, uint16_t task_id, uint16_t value){
     NodeEvent event;
 
@@ -115,19 +122,23 @@ void usb_add_event(EventType type, uint32_t tick, uint16_t task_id, uint16_t val
     }
 }
 
+// Deja un TICK_REPORT pendiente (reemplaza al anterior si no salió)
 void usb_post_report(const Frame *report){
     pending_report = *report;
     report_pending = true;
 }
 
+// Deja una trama para el final, después de eventos y reporte
 void usb_post_last(const Frame *frame){
     pending_last = *frame;
     last_pending = true;
 }
 
+// Envía lo pendiente en orden: respuestas, reporte, eventos y la última trama
 void usb_send_events(){
     static Frame message;
 
+    // Primero las respuestas de control que quedaron sin enviar, en orden
     while (reply_count > 0) {
         if (!write_now(&replies[reply_head])) return;
         reply_head = (reply_head + 1) % 8;
@@ -153,6 +164,7 @@ void usb_send_events(){
         }
 
         build_event_batch(&message, &events, (size_t)space / EVENT_RECORD_SIZE);
+        // si al final no cupo, esos eventos ya salieron de la cola: se cuentan
         if (!write_now(&message)) dropped_events += message.payload[0];
     }
 
@@ -175,19 +187,23 @@ void usb_send_events(){
     }
 }
 
+// Tramas descartadas desde START
 uint32_t usb_bad_frames(){
     return bad_frames;
 }
 
+// Eventos descartados desde START
 uint32_t usb_events_dropped(){
     return dropped_events;
 }
 
+// Contadores de tramas malas y eventos descartados en 0
 void usb_reset_counters(){
     bad_frames = 0;
     dropped_events = 0;
 }
 
+// Vacía la cola de eventos y descarta el reporte pendiente
 void usb_clear_events(){
     NodeEvent event;
 
