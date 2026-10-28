@@ -1,3 +1,4 @@
+// Convierte las líneas del CSV y del comando add en tareas válidas.
 #include "host.h"
 #include <ctype.h>
 #include <errno.h>
@@ -5,7 +6,8 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
-/* Lectura acotada: una línea maliciosa no provoca una asignación enorme. */
+
+// Lee con límite fijo; rechaza NUL y líneas que no caben completas.
 int bounded_line(FILE *f,char *out,size_t capacity) {
     size_t used=0;
     int ch;
@@ -22,6 +24,7 @@ int bounded_line(FILE *f,char *out,size_t capacity) {
     return used?1:0;
 }
 
+// Exige dígitos decimales y rango uint32, sin signos ni caracteres sobrantes.
 bool parse_u32(const char *s, uint32_t *v) {
     if (!s || !*s) return false;
     for (const char *p=s; *p; ++p) if (!isdigit((unsigned char)*p)) return false;
@@ -38,8 +41,10 @@ static bool fail(char *e,size_t n,const char *s) {
     return false;
 }
 
+// Valida los seis campos en una copia local y solo actualiza out si todos pasan.
 bool task_parse(const char *line, Task *out, char *err, size_t n) {
     char b[160];
+    // Mide el contenido sin contar los caracteres de fin de línea del archivo o la consola.
     size_t len=strcspn(line,"\r\n");
     if (line[len] && strspn(line+len,"\r\n")!=strlen(line+len)) return fail(err,n,"contenido después del fin de línea");
     if (!len || len>=sizeof b) return fail(err,n,"línea vacía o demasiado larga");
@@ -48,6 +53,7 @@ bool task_parse(const char *line, Task *out, char *err, size_t n) {
     char *f[6];
     f[0]=b;
     size_t k=1;
+    // Separa los campos reemplazando comas por ceros dentro de la copia.
     for (size_t i=0;i<len;i++) if (b[i]==',') {
         if (k==6) return fail(err,n,"se requieren exactamente seis campos");
         b[i]=0;
@@ -58,6 +64,7 @@ bool task_parse(const char *line, Task *out, char *err, size_t n) {
         0
     };
     if (!parse_u32(f[0],&t.id) || !t.id || t.id>RT_MAX_TASK_ID || !parse_u32(f[2],&t.W) || !t.W || !parse_u32(f[3],&t.T) || !t.T || !parse_u32(f[4],&t.D) || !t.D) return fail(err,n,"id [1,65535]; W/T/D positivos uint32");
+    // El tipo debe ser un solo carácter; la admisión revisará después si hay capacidad para esa tarea.
     if (strlen(f[1])!=1 || (f[1][0]!='P' && f[1][0]!='S')) return fail(err,n,"tipo debe ser P o S");
     t.type=f[1][0];
     const char *p=f[5];
@@ -66,6 +73,7 @@ bool task_parse(const char *line, Task *out, char *err, size_t n) {
     for (;*p;p++) if (!isdigit((unsigned char)*p)) return fail(err,n,"criticidad debe ser int32");
     errno=0;
     char *end;
+    // La criticidad sí permite negativos, pero debe caber en int32.
     long long c=strtoll(f[5],&end,10);
     if (errno || *end || c<INT32_MIN || c>INT32_MAX) return fail(err,n,"criticidad fuera de int32");
     t.criticality=(int32_t)c;
@@ -73,6 +81,7 @@ bool task_parse(const char *line, Task *out, char *err, size_t n) {
     return true;
 }
 
+// Carga candidatas, omite el encabezado y rechaza IDs repetidos dentro del CSV.
 bool task_load(const char *path,Task *tasks,size_t *count,char *err,size_t n) {
     FILE *f=fopen(path,"r");
     if (!f) {
@@ -99,6 +108,7 @@ bool task_load(const char *path,Task *tasks,size_t *count,char *err,size_t n) {
         first_record=false;
         Task t;
         char why[160];
+        // El CSV guarda candidatas; el límite de ocho tareas se aplica luego por nodo, no por archivo.
         if (*count==TASK_CAP || !task_parse(line,&t,why,sizeof why)) {
             snprintf(err,n,"línea %zu: %s",lineno,*count==TASK_CAP?"máximo 512 tareas":why);
             ok=false;

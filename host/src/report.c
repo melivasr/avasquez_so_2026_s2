@@ -1,3 +1,4 @@
+// Consume eventos compartidos y genera CSV, estadísticas y el Gantt HTML.
 #include "host.h"
 #include <errno.h>
 #include <inttypes.h>
@@ -5,11 +6,15 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+// Relaciona cada trabajo con su liberación, número y primera ejecución.
 typedef struct {
     uint64_t release;
     uint32_t sequence;
     bool first;
 } JobStat;
+
+// Estadísticas por pareja tarea/nodo; jobs conserva los trabajos solapados.
 typedef struct {
     uint32_t id;
     int node;
@@ -21,12 +26,14 @@ typedef struct {
     JobStat jobs[RT_MAX_JOBS];
     size_t pending;
 } Stat;
+
 static FILE *open_output(const Config *c,const char *name) {
     char path[1100];
     snprintf(path,sizeof path,"%s/%s",c->output,name);
     return fopen(path,"w+");
 }
 
+// Duplica comillas internas para conservar una celda CSV válida.
 static void csv_text(FILE *f,const char *s) {
     fputc('"',f);
     for(;*s;s++) {
@@ -36,7 +43,7 @@ static void csv_text(FILE *f,const char *s) {
     fputc('"',f);
 }
 
-/* Cadena JS segura dentro de <script>: escapa comillas, \\ y '<'. */
+// Escapa texto antes de incluirlo en JavaScript, incluido < para no cerrar script.
 static void js_text(FILE *f,const char *s) {
     fputc('"',f);
     for(;*s;s++) {
@@ -59,27 +66,29 @@ static Stat *find_stat(Stat *stats,size_t *n,uint32_t id,int node) {
     return p;
 }
 
-/* SWITCH mantiene la selección hasta el siguiente cambio. COMPLETE/MISS
- * cierran el trabajo aunque el siguiente SWITCH todavía no haya llegado. */
+// La traza conserva el cursor y la tarea seleccionada hasta un nuevo evento.
 typedef struct {
     uint64_t cursor;
     uint32_t selected;
     bool valid;
 } Trace;
 
+// Reconstruye intervalos conocidos; los huecos inválidos no se rellenan como ejecución.
 static void advance_trace(Trace *trace,uint64_t until,int node,Stat *stats,size_t *n,
                           FILE *gantt,uint64_t *busy,bool *incomplete) {
     if(until<=trace->cursor)return;
     if(trace->valid && trace->selected) {
         Stat *st=find_stat(stats,n,trace->selected,node);
         if(st && st->pending) {
-            JobStat *job=&st->jobs[0]; /* FIFO dentro de una misma tarea. */
+            // Los trabajos del mismo ID se atienden en orden FIFO; los ticks se atribuyen al más antiguo.
+            JobStat *job=&st->jobs[0];
             fprintf(gantt,"%d,%"PRIu32",%"PRIu64",%"PRIu64"\n",
                     node,st->id,trace->cursor,until);
             uint64_t duration=until-trace->cursor;
             *busy+=duration;
             st->runs+=duration;
             if(!job->first && trace->cursor>=job->release) {
+                // Esta latencia parte de RELEASE, no del instante físico en que se presionó el botón.
                 st->first_sum+=trace->cursor-job->release;
                 st->first_n++;
                 job->first=true;
@@ -89,6 +98,7 @@ static void advance_trace(Trace *trace,uint64_t until,int node,Stat *stats,size_
     trace->cursor=until;
 }
 
+// Plantilla de estructura y estilos; estas cadenas son el contenido del HTML generado.
 static const char *const PAGE_HEAD[]= {
     "<!doctype html>\n",
     "<html lang='es'>\n",
@@ -265,6 +275,7 @@ static const char *const PAGE_HEAD[]= {
     "</main>\n",
 };
 
+// Visualiza datos ya registrados; reproducir el Gantt no vuelve a calendarizar tareas.
 static const char *const PAGE_SCRIPT[]= {
     "(function(){\n",
     "'use strict';\n",
@@ -467,8 +478,7 @@ static void put_lines(FILE *f,const char *const *lines,size_t count) {
     for(size_t i=0;i<count;i++)fputs(lines[i],f);
 }
 
-/* Página autocontenida: los datos van en `R` y el script dibuja un Gantt
- * por nodo con ventana desplazable (miles de ticks no caben en un SVG fijo). */
+// Une datos y plantilla; U medida es ticks ocupados reconstruidos / ticks observados.
 static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const Stat *stats,size_t n,
                        const long double theoretical[NODES],const uint64_t busy[NODES],const uint64_t end_tick[NODES],
                        const uint64_t switches[NODES],uint32_t counters[NODES][5],const bool incomplete[NODES],
@@ -477,6 +487,7 @@ static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const 
     fprintf(html,"<script>\nconst R={nodes:['ESP32','Pico'],drop:%"PRIu64",\nutil:[",dropped[2]);
     for(int i=0;i<NODES;i++) {
         fprintf(html,"{th:%.6Lf,obs:%.6Lf,part:%d,sw:%"PRIu64",end:%"PRIu64",drop:%"PRIu64",cnt:[%u,%u,%u,%u,%u]},",
+                // La carga teórica es la final; la medida resume el horizonte observado, incluso si hubo migración.
                 theoretical[i],end_tick[i]?(long double)busy[i]/end_tick[i]:0.0L,incomplete[i],switches[i],end_tick[i],dropped[i],
                 counters[i][0],counters[i][1],counters[i][2],counters[i][3],counters[i][4]);
     }
@@ -485,6 +496,7 @@ static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const 
         const Stat *p=&stats[i];
         fprintf(html,"{n:%d,id:%"PRIu32",ty:'%c',W:%"PRIu32",T:%"PRIu32",D:%"PRIu32",C:%"PRIu32",rel:%"PRIu64",run:%"PRIu64",comp:%"PRIu64",miss:%"PRIu64",ign:%"PRIu64",f:",
                 p->node,p->id,p->task.type=='S'?'S':'P',p->task.W,p->task.T,p->task.D,p->cost,p->releases,p->runs,p->completed,p->misses,p->ignored);
+        // Sin muestras usa null para distinguir ausencia de datos de una latencia medida de cero.
         if(p->first_n)fprintf(html,"%.3Lf",(long double)p->first_sum/p->first_n);
         else fputs("null",html);
         fputs(",c:",html);
@@ -492,7 +504,7 @@ static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const 
         else fputs("null,cm:null",html);
         fputs("},\n",html);
     }
-    /* iv[nodo] = [id,inicio,fin,...]; mk[nodo] = [código,id,tick,valor,...]. */
+
     char line[128];
     fputs("],\niv:[",html);
     for(int i=0;i<NODES;i++) {
@@ -527,6 +539,7 @@ static void write_html(FILE *html,FILE *gantt,FILE *marks,FILE *decisions,const 
     fputs("</script>\n</body>\n</html>\n",html);
 }
 
+// El reporte solo consume IPC; los drivers son quienes leen los puertos seriales.
 int report_run(Shared *s,const Config *c) {
     if(mkdir(c->output,0755)<0 && errno!=EEXIST)return 1;
     FILE *events=open_output(c,"events.csv"),*gantt=open_output(c,"gantt.csv"),*statsfile=open_output(c,"tasks.csv"),*html=open_output(c,"report.html");
@@ -538,7 +551,7 @@ int report_run(Shared *s,const Config *c) {
         return 1;
     }
     Stat *stats=calloc(TASK_CAP*NODES,sizeof *stats);
-    /* Marcas del Gantt y decisiones de admisión, para el HTML final. */
+
     FILE *marks=tmpfile(),*decisions=tmpfile();
     if(!stats || !marks || !decisions) {
         free(stats);
@@ -564,6 +577,8 @@ int report_run(Shared *s,const Config *c) {
     bool done=parent==1;
     while(!done) {
         Record r;
+
+        // Espera con semáforos y revisa si murió el coordinador cuando no recibe mensajes.
         if(queue_pop(&s->events,&r,500)<0) {
             if(getppid()!=parent)break;
             continue;
@@ -575,6 +590,8 @@ int report_run(Shared *s,const Config *c) {
         fprintf(events,"%"PRIu64",%d,%d,%d,%"PRIu32",%"PRIu32",%"PRIu32",",r.ns,r.node,r.kind,r.code,r.tick,r.id,r.value);
         csv_text(events,r.text);
         fputc('\n',events);
+
+        // Guarda decisiones sin destino antes de filtrar los mensajes generales con node=-1.
         if(r.kind==R_TASK) {
             fprintf(decisions,"{ns:%"PRIu64",n:%d,id:%"PRIu32",k:%d,ty:'%c',W:%"PRIu32",T:%"PRIu32",D:%"PRIu32",cr:%"PRId32",C:%"PRIu32",why:",
                     r.ns,r.node,r.task.id,r.code,r.task.type=='S'?'S':'P',r.task.W,r.task.T,r.task.D,r.task.criticality,r.value);
@@ -584,10 +601,10 @@ int report_run(Shared *s,const Config *c) {
         if(r.node<0 || r.node>=NODES)continue;
         int node=r.node;
         Trace *trace=&traces[node];
+
+        // El heartbeat amplía el horizonte, pero no adelanta el Gantt sobre eventos aún pendientes.
         if(r.kind==R_TICK) {
-            /* tick k se reporta después de procesar el tramo [k,k+1).
-             * ESP32 puede intercalar este reporte entre lotes de eventos más
-             * antiguos: no se avanza el cursor del Gantt hasta recibirlos. */
+
             uint64_t horizon=(uint64_t)r.tick+1;
             if(horizon>end_tick[node])end_tick[node]=horizon;
             for(size_t i=0;i<5;i++) {
@@ -601,9 +618,9 @@ int report_run(Shared *s,const Config *c) {
             }
             continue;
         }
+        // STOP confirmado permite cerrar solo hasta el último límite de ejecución observado.
         if(r.kind==R_STOP) {
-            /* ACK de STOP llega después de todos los eventos pendientes.
-             * Cerrar solo hasta un límite efectivamente observado. */
+
             advance_trace(trace,end_tick[node],node,stats,&n,gantt,&busy[node],&incomplete[node]);
             trace->selected=0;
             continue;
@@ -615,6 +632,7 @@ int report_run(Shared *s,const Config *c) {
             }
             continue;
         }
+        // La carga teórica cambia solo con despliegues confirmados y retiros.
         if(r.kind==R_TASK) {
             Stat *st=find_stat(stats,&n,r.task.id,node);
             if(!st) {
@@ -623,7 +641,7 @@ int report_run(Shared *s,const Config *c) {
             }
             st->task=r.task;
             st->cost=r.value;
-            /* code 1: confirmada; code 2: retirada al perder nodo. */
+
             if(r.code==1 && !st->confirmed) {
                 theoretical[node]+=(long double)r.value/r.task.T;
                 st->confirmed=true;
@@ -636,6 +654,8 @@ int report_run(Shared *s,const Config *c) {
         }
         if(r.kind!=R_NODE)continue;
         if(r.tick>end_tick[node])end_tick[node]=r.tick;
+
+        // Salta el hueco de ticks perdidos y espera una selección conocida para retomar la traza.
         if(r.code==RT_TICK_LOST) {
             uint64_t gap_start=r.tick>=r.value?r.tick-r.value:0;
             advance_trace(trace,gap_start,node,stats,&n,gantt,&busy[node],&incomplete[node]);
@@ -650,6 +670,7 @@ int report_run(Shared *s,const Config *c) {
             continue;
         }
         advance_trace(trace,r.tick,node,stats,&n,gantt,&busy[node],&incomplete[node]);
+        // Un SWITCH recupera una selección conocida para reconstruir ejecución después de un hueco.
         if(r.code==RT_SWITCH) {
             if(r.id && r.id!=trace->selected)switches[node]++;
             trace->selected=r.id;
@@ -660,7 +681,7 @@ int report_run(Shared *s,const Config *c) {
             incomplete[node]=true;
             continue;
         }
-        /* SPORADIC_IGNORED con id 0: pulsación en un nodo sin tarea S. */
+
         if(r.code==RT_RELEASE || r.code==RT_MISS || r.code==RT_SPORADIC_IGNORED)
             fprintf(marks,"%d %d %"PRIu32" %"PRIu32" %"PRIu32"\n",node,r.code,r.id,r.tick,r.value);
         if(!r.id || r.code==RT_TASK_ADDED)continue;
@@ -669,12 +690,14 @@ int report_run(Shared *s,const Config *c) {
             incomplete[node]=true;
             continue;
         }
+
+        // Empareja RELEASE con COMPLETE/MISS por número de trabajo para medir respuestas válidas.
         if(r.code==RT_RELEASE) {
             st->releases++;
             if(st->pending==RT_MAX_JOBS) {
                 incomplete[node]=true;
                 trace->valid=false;
-                st->pending=0; /* Pérdidas previas: evitar acumulación de trabajos huérfanos. */
+                st->pending=0;
             }
             st->jobs[st->pending++]=(JobStat){.release=r.tick,.sequence=r.value};
         } else if(r.code==RT_COMPLETE || r.code==RT_MISS) {
@@ -696,6 +719,8 @@ int report_run(Shared *s,const Config *c) {
     uint64_t dropped[3]= {
         0
     };
+
+    // Copia descartes bajo lock; si no logra leerlos, marca ambas trazas incompletas.
     if(sem_wait_ms(&s->lock,20)==0) {
         memcpy(dropped,s->dropped,sizeof dropped);
         sem_post(&s->lock);
@@ -714,6 +739,8 @@ int report_run(Shared *s,const Config *c) {
         else fputc(',',statsfile);
         fputc('\n',statsfile);
     }
+
+    // Con todos los datos consumidos, genera el HTML y cierra archivos comprobando errores de salida.
     write_html(html,gantt,marks,decisions,stats,n,theoretical,busy,end_tick,switches,counters,incomplete,dropped);
     fclose(marks);
     fclose(decisions);

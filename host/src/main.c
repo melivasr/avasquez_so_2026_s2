@@ -1,3 +1,4 @@
+// Coordina arranque, comandos, supervisión, reubicación y cierre del host.
 #include "host.h"
 #include <ctype.h>
 #include <errno.h>
@@ -12,6 +13,8 @@
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
+
+// Solo shared apunta a memoria común; las asignaciones y los PID pertenecen al coordinador.
 typedef struct {
     Config cfg;
     Shared *shared;
@@ -24,11 +27,13 @@ typedef struct {
     Task ids[TASK_CAP];
     size_t ids_count;
 } Host;
+
+// Detecta señales, tiempo de corrida, muerte de hijos y silencio de heartbeat.
 static void inspect(Host *h) {
     struct signalfd_siginfo si;
     if(read(h->signals,&si,sizeof si)==sizeof si) {
         h->quit=true;
-        h->stop_nodes=false;
+        h->stop_nodes=false; // Salir por señal mantiene las placas ejecutando; q sí solicita STOP.
     }
     uint64_t now=monotonic_ns(),last[NODES]= {
         0
@@ -43,15 +48,20 @@ static void inspect(Host *h) {
     bool io[NODES]= {
         0
     };
+
+    // Copia el estado bajo lock; si no lo obtiene, last conserva ceros y puede causar una falsa caída.
     if(sem_wait_ms(&h->shared->lock,20)==0) {
         memcpy(last,h->shared->last_tick_ns,sizeof last);
         memcpy(io,h->shared->io_failed,sizeof io);
         sem_post(&h->shared->lock);
     }
+
+    // Ventana sin heartbeat = tick_us * report_ticks * missed_reports, convertida a nanosegundos.
     uint64_t window=(uint64_t)h->cfg.tick_us*h->cfg.report_ticks*h->cfg.missed_reports*1000;
     for(int n=0;n<NODES;n++) {
         if(h->drivers[n]>0) {
             int status;
+            // WNOHANG permite comprobar y recoger hijos terminados sin bloquear la supervisión.
             pid_t p=waitpid(h->drivers[n],&status,WNOHANG);
             if(p>0) {
                 h->drivers[n]=0;
@@ -78,6 +88,7 @@ static void inspect(Host *h) {
     }
 }
 
+// Encola la orden en memoria compartida y despierta al driver con eventfd.
 static bool send_command(Host *h,int n,const Frame *f) {
     if(h->drivers[n]<=0)return false;
     Record r= {
@@ -88,6 +99,7 @@ static bool send_command(Host *h,int n,const Frame *f) {
     return eventfd_write(h->wake[n],1)==0;
 }
 
+// Espera respuestas en tramos de 50 ms para seguir revisando señales y caídas.
 static Record await_reply(Host *h,int n) {
     Record r= {
         .code=REPLY_IO
@@ -112,6 +124,7 @@ static Record transaction(Host *h,int n,const Frame *f) {
     return r;
 }
 
+// Distingue admisión teórica, despliegue confirmado, rechazo y estado incierto.
 static void log_task(Host *h,int n,const Task *t,int code,const char *why) {
     Record r= {
         .kind=R_TASK,.node=n,.id=t->id,.task=*t,.code=code
@@ -123,6 +136,7 @@ static void log_task(Host *h,int n,const Task *t,int code,const char *why) {
     fflush(stdout);
 }
 
+// Excluye el nodo incierto de nuevas asignaciones y solicita revisar sus tareas.
 static void quarantine(Host *h,int n) {
     if(h->nodes[n].operational) {
         h->nodes[n].operational=false;
@@ -130,6 +144,7 @@ static void quarantine(Host *h,int n) {
     }
 }
 
+// Construye la carga CSV de DEPLOY o ADD_TASK sin exceder el tamaño de trama.
 static Frame task_frame(uint8_t type,const Task *tasks,size_t count) {
     Frame f= {
         .type=type
@@ -152,6 +167,7 @@ static void remove_last(Node *n) {
     if(n->count)n->count--;
 }
 
+// Confirma ADD_TASK con ACK; un rechazo libera la reserva y la incertidumbre la conserva.
 static bool deploy_add(Host *h,int n,const Task *t,const char *label) {
     log_task(h,n,t,0,"ADMITIDA por análisis; pendiente de ACK");
     Frame f=task_frame(ADD_TASK,t,1);
@@ -170,6 +186,7 @@ static bool deploy_add(Host *h,int n,const Task *t,const char *label) {
     return false;
 }
 
+// Aplica el plan por ADD_TASK: los trabajos migrados reinician, sin reiniciar al sobreviviente.
 static void relocate(Host *h) {
     for(int failed=0;failed<NODES;failed++) if(h->failed[failed]) {
         h->failed[failed]=false;
@@ -207,6 +224,7 @@ static void relocate(Host *h) {
     }
 }
 
+// Valida un ID nuevo, ejecuta admisión y solicita su despliegue dinámico.
 static void manual_add(Host *h,const char *line) {
     Task t;
     char err[256];
@@ -223,12 +241,14 @@ static void manual_add(Host *h,const char *line) {
         log_task(h,-1,&t,3,"RECHAZADA: límite de 512 IDs por sesión");
         return;
     }
+    // Un ID intentado queda reservado en la sesión aunque después no pase admisión.
     h->ids[h->ids_count++]=t;
     int n=place(h->nodes,&t,h->cfg.algorithm,h->cfg.heuristic,err,sizeof err);
     if(n<0)log_task(h,-1,&t,3,err);
     else deploy_add(h,n,&t,"DESPLEGADA y confirmada sin reiniciar tick");
 }
 
+// Intenta confirmar STOP antes de retirar el driver y reubicar sus tareas.
 static void manual_fail(Host *h,int n) {
     const char *name=n?"Pico":"ESP32";
     if(!h->nodes[n].operational || h->expected_exit[n]) {
@@ -236,11 +256,11 @@ static void manual_fail(Host *h,int n) {
         fflush(stdout);
         return;
     }
-    /* Retirarlo de la planificación evita que el watchdog interprete el
-     * vaciado de STOP como otra falla. La migración espera su respuesta. */
+
     quarantine(h,n);
     Frame stop={.type=STOP};
     Record reply=transaction(h,n,&stop);
+    // Sin confirmación de STOP, el host no puede asegurar que la CPU del nodo dejó de ejecutar.
     bool stopped=reply.code==REPLY_OK;
     note(h->shared,n,"desconexión simulada mediante comando fail; STOP %s",
          stopped?"confirmado":"sin confirmación/rechazado; detención no garantizada");
@@ -254,10 +274,11 @@ static void manual_fail(Host *h,int n) {
     h->expected_exit[n]=true;
     queue_push(&h->shared->commands[n],&close_driver,20);
     eventfd_write(h->wake[n],1);
-    /* Completar también si el usuario envió fail y q en el mismo bloque. */
+
     if(!h->quit)relocate(h);
 }
 
+// Interpreta add, trigger, status, fail y q sin decidir la ejecución local de cada tick.
 static void command(Host *h,const char *raw_line) {
     char line[256];
     size_t length=strlen(raw_line);
@@ -289,6 +310,7 @@ static void command(Host *h,const char *raw_line) {
     } else if(*line)fprintf(stderr,"Comandos: add id,P|S,W,T,D,criticidad | trigger id | status | fail esp | fail pico | q\n");
 }
 
+// Arranque: calibrar, ordenar candidatas, admitir, desplegar y enviar START.
 static void bootstrap(Host *h,Task *tasks,size_t count) {
     Frame cal= {
         .type=CAL_REQ,.length=4
@@ -328,6 +350,8 @@ static void bootstrap(Host *h,Task *tasks,size_t count) {
         }
     }
     if(h->quit)return;
+
+    // Encola ambos START antes de esperar ACK; envío/ACK acota el desfase, no lo mide físicamente.
     Frame start=start_frame(&h->cfg);
     uint64_t begin[2]= {
         0
@@ -354,6 +378,7 @@ static void bootstrap(Host *h,Task *tasks,size_t count) {
     fflush(stdout);
 }
 
+// waitpid recoge al hijo; si no sale a tiempo, escala a SIGTERM y luego SIGKILL.
 static bool wait_bounded(pid_t *pid,unsigned ms) {
     if(*pid<=0)return false;
     int status=0;
@@ -383,6 +408,7 @@ static bool wait_bounded(pid_t *pid,unsigned ms) {
     return false;
 }
 
+// Cierra primero drivers y después reporte para dejar consumir los últimos eventos.
 static void shutdown_host(Host *h) {
     if(h->stop_nodes) {
         for(int n=0;n<NODES;n++)if(h->drivers[n]>0 && !h->expected_exit[n]) {
@@ -392,7 +418,7 @@ static void shutdown_host(Host *h) {
             Record r=transaction(h,n,&f);
             note(h->shared,n,"STOP: %s",r.code==REPLY_OK?"confirmado":"sin confirmación/rechazado");
         }
-        /* Da a los controladores una ventana acotada para eventos finales. */
+
         poll(NULL,0,100);
     }
     for(int n=0;n<NODES;n++)if(h->drivers[n]>0) {
@@ -413,6 +439,7 @@ static void shutdown_host(Host *h) {
     }
 }
 
+// Los hijos ignoran SIGINT y permiten SIGTERM; el coordinador recibe señales por signalfd.
 static void child_signals(void) {
     signal(SIGINT,SIG_IGN);
     signal(SIGTERM,SIG_DFL);
@@ -421,6 +448,7 @@ static void child_signals(void) {
     sigprocmask(SIG_SETMASK,&empty,NULL);
 }
 
+// Valida entradas antes de crear recursos y procesos.
 int main(int argc,char **argv) {
     if(argc!=2) {
         fprintf(stderr,"Uso: %s configuración.ini\n",argv[0]);
@@ -440,10 +468,12 @@ int main(int argc,char **argv) {
     }
     memcpy(h.ids,tasks,count*sizeof *tasks);
     h.ids_count=count;
+
     sigset_t mask;
     sigemptyset(&mask);
     sigaddset(&mask,SIGINT);
     sigaddset(&mask,SIGTERM);
+    // Bloquea la entrega asíncrona de estas señales para leerlas después mediante signalfd.
     sigprocmask(SIG_BLOCK,&mask,NULL);
     h.signals=signalfd(-1,&mask,SFD_NONBLOCK|SFD_CLOEXEC);
     if(h.signals<0) {
@@ -452,18 +482,23 @@ int main(int argc,char **argv) {
     }
     char shm_name[128];
     int shm_fd=-1;
+
+    // Crea el mapeo y sus semáforos antes de fork para que los hijos los hereden.
     h.shared=ipc_create(shm_name,sizeof shm_name,&shm_fd);
     if(!h.shared) {
         perror("shm_open/mmap/semaphores");
         close(h.signals);
         return 1;
     }
-    /* mmap sigue válido tras unlink; no queda un nombre huérfano si el host muere. */
+
+    // Quita el nombre del objeto; el mapeo sigue válido hasta liberarlo.
     shm_unlink(shm_name);
     for(int n=0;n<NODES;n++) {
         h.wake[n]=eventfd(0,EFD_NONBLOCK|EFD_CLOEXEC);
         if(h.wake[n]<0)goto init_error;
     }
+
+    // Primer hijo: consume eventos y genera reportes.
     h.reporter=fork();
     if(h.reporter<0)goto init_error;
     if(h.reporter==0) {
@@ -473,6 +508,8 @@ int main(int argc,char **argv) {
         int rc=report_run(h.shared,&h.cfg);
         _exit(rc);
     }
+
+    // Un hijo por placa: junto con coordinador y reporte son cuatro procesos.
     for(int n=0;n<NODES;n++) {
         h.drivers[n]=fork();
         if(h.drivers[n]<0) {
@@ -490,7 +527,8 @@ int main(int argc,char **argv) {
     note(h.shared,-1,"inicio: coordinador=%ld, ESP32=%ld, Pico=%ld, reporte=%ld",(long)getpid(),(long)h.drivers[0],(long)h.drivers[1],(long)h.reporter);
     bootstrap(&h,tasks,count);
     if(h.cfg.duration_s && !h.quit) {
-        /* El límite mide ejecución: excluye calibración y despliegue. */
+
+        // La duración automática empieza después del arranque; no incluye calibración ni despliegue.
         h.run_deadline_ns=monotonic_ns()+(uint64_t)h.cfg.duration_s*1000000000;
         note(h.shared,-1,"duración automática: %"PRIu32" s desde fin del arranque",h.cfg.duration_s);
         printf("Cierre automático en %"PRIu32" s (q permite terminar antes).\n",h.cfg.duration_s);
@@ -499,8 +537,8 @@ int main(int argc,char **argv) {
     bool terminal=isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO,&saved)==0;
     if(terminal) {
         struct termios t=saved;
-        /* En modo no canónico el host edita y dibuja su propia entrada.
-         * El eco del kernel mostraría Backspace como ^? sin borrar la línea. */
+
+        // El host edita y refleja la entrada para manejar q inmediato, Backspace y Ctrl+U.
         t.c_lflag&=~(tcflag_t)(ICANON|ECHO|ECHONL);
         t.c_cc[VMIN]=1;
         t.c_cc[VTIME]=0;
@@ -512,6 +550,8 @@ int main(int argc,char **argv) {
     size_t used=0;
     bool discard=false;
     int input_fd=STDIN_FILENO;
+
+    // Supervisa y reubica antes de esperar hasta 100 ms por consola o señales.
     while(!h.quit) {
         inspect(&h);
         if(h.quit)break;
@@ -531,6 +571,7 @@ int main(int argc,char **argv) {
         if(f[0].revents&(POLLIN|POLLHUP)) {
             char bytes[256];
             ssize_t got=read(input_fd,bytes,sizeof bytes);
+            // EOF desactiva la consola, pero deja funcionando la vigilancia de las placas.
             if(got<=0)input_fd=-1;
             for(ssize_t i=0;i<got && !h.quit;i++) {
                 unsigned char ch=(unsigned char)bytes[i];
@@ -555,7 +596,7 @@ int main(int argc,char **argv) {
                         used--;
                         if(terminal)fputs("\b \b",stdout);
                     }
-                } else if(ch==21) { /* Ctrl+U: borrar la línea completa. */
+                } else if(ch==21) {
                     if(terminal)for(size_t j=0;j<used;j++)fputs("\b \b",stdout);
                     used=0;
                     discard=false;
@@ -572,6 +613,8 @@ int main(int argc,char **argv) {
     shutdown_host(&h);
     for(int n=0;n<NODES;n++)close(h.wake[n]);
     close(h.signals);
+
+    // Libera semáforos y memoria cuando los hijos ya terminaron.
     ipc_destroy(h.shared,shm_fd,shm_name);
     return h.fatal?1:0;
     init_error: perror("inicialización");
